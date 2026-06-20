@@ -1,0 +1,29 @@
+## Build results
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+## Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Rider / VS Code
+.idea/
+.vscode/
+
+## Local configuration (contains connection strings)
+**/appsettings.json
+**/appsettings.Development.json
+
+## Uploaded / runtime content (not source code)
+FolderManagementSystemAPI/course-folders/
+FolderManagementSystemAPI/src/
+FolderManagementSystemAPI/wwwroot/course-folders/
+
+## OS
+Thumbs.db
+.DS_Store

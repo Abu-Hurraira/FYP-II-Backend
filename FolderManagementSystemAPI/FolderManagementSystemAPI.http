@@ -1,0 +1,6 @@
+@FolderManagementSystemAPI_HostAddress = http://localhost:5161
+
+GET {{FolderManagementSystemAPI_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

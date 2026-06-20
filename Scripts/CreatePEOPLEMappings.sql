@@ -1,0 +1,12 @@
+USE FolderManagementDB;
+GO
+
+CREATE TABLE PEOPLEMappings
+(
+    MappingID INT IDENTITY(1,1) PRIMARY KEY,
+    PEOID INT NOT NULL,
+    PLOID INT NOT NULL,
+    Percentage DECIMAL(5, 2) NULL,
+    MappedByUserID INT NULL
+);
+GO
