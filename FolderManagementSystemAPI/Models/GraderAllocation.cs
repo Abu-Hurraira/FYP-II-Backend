@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -25,4 +25,6 @@ public partial class GraderAllocation
     [ForeignKey("TeacherUserId")]
     [InverseProperty("GraderAllocationTeacherUsers")]
     public virtual User TeacherUser { get; set; } = null!;
+
+    public virtual ICollection<GraderCourseTask> GraderCourseTasks { get; set; } = new List<GraderCourseTask>();
 }

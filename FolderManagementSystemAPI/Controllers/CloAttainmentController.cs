@@ -9,10 +9,12 @@ namespace FolderManagementSystemAPI.Controllers;
 public class CloAttainmentController : ControllerBase
 {
     private readonly CloAttainmentService _service;
+    private readonly GraderAccessService _graderAccess;
 
-    public CloAttainmentController(CloAttainmentService service)
+    public CloAttainmentController(CloAttainmentService service, GraderAccessService graderAccess)
     {
         _service = service;
+        _graderAccess = graderAccess;
     }
 
     [HttpGet("offered-course/{offeredCourseId:int}/students")]
@@ -35,6 +37,11 @@ public class CloAttainmentController : ControllerBase
         [FromQuery] int teacherUserId,
         [FromQuery] int offeredCourseId)
     {
+        if (await DenyGraderUnlessMarksAsync(offeredCourseId, assessmentId) is { } denied)
+        {
+            return denied;
+        }
+
         var resolved = await _service.TryResolveScopeAsync(offeredCourseId, teacherUserId);
         if (!resolved.Ok || resolved.Scope == null)
         {
@@ -56,6 +63,11 @@ public class CloAttainmentController : ControllerBase
         [FromQuery] int offeredCourseId,
         SaveAssessmentMarksDto dto)
     {
+        if (await DenyGraderUnlessMarksAsync(offeredCourseId, assessmentId) is { } denied)
+        {
+            return denied;
+        }
+
         var resolved = await _service.TryResolveScopeAsync(offeredCourseId, dto.TeacherUserId);
         if (!resolved.Ok || resolved.Scope == null)
         {
@@ -197,5 +209,22 @@ public class CloAttainmentController : ControllerBase
         }
 
         return Ok(await _service.GetStudentPloResultsAsync(resolved.Scope));
+    }
+
+    private async Task<ActionResult?> DenyGraderUnlessMarksAsync(int offeredCourseId, int assessmentId)
+    {
+        if (!GraderAccessService.IsGrader(User))
+        {
+            return null;
+        }
+
+        var taskCode = await _graderAccess.MarksTaskCodeForAssessmentAsync(assessmentId);
+        if (string.IsNullOrWhiteSpace(taskCode)
+            || !await _graderAccess.CanAccessAsync(User, offeredCourseId, taskCode))
+        {
+            return BadRequest(new { message = "Entering marks for this paper is not assigned to you." });
+        }
+
+        return null;
     }
 }

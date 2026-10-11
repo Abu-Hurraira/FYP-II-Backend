@@ -547,6 +547,7 @@ public class AssessmentsController : ControllerBase
             await _context.SaveChangesAsync();
         }
 
+        await _assessmentFolderSync.SyncQuestionPdfAsync(assessmentId, dto.TeacherUserId);
         return await GetAssessment(assessmentId, dto.TeacherUserId);
     }
 
@@ -697,6 +698,7 @@ public class AssessmentsController : ControllerBase
         }
 
         await _context.SaveChangesAsync();
+        await _assessmentFolderSync.SyncQuestionPdfAsync(assessmentId, dto.TeacherUserId);
 
         return await GetAssessment(assessmentId, dto.TeacherUserId);
     }
@@ -839,6 +841,100 @@ public class AssessmentsController : ControllerBase
         {
             return BadRequest(new { message = ex.Message });
         }
+    }
+
+    [HttpPost("{assessmentId:int}/parse-question-paper")]
+    public async Task<ActionResult<ParsedQuestionPaperDto>> ParseQuestionPaper(
+        int assessmentId,
+        [FromQuery] int teacherUserId)
+    {
+        var assessment = await _context.Assessments
+            .Include(a => a.AssessmentType)
+            .FirstOrDefaultAsync(a => a.AssessmentId == assessmentId);
+        if (assessment == null)
+        {
+            return NotFound(new { message = "Assessment not found." });
+        }
+
+        var context = await ResolveOfferedCourseContextAsync(assessment.OfferedCourseId);
+        if (context == null || !await CanAccessOfferedCourseAsync(context, teacherUserId))
+        {
+            return BadRequest(new { message = "You do not have access to this assessment." });
+        }
+
+        var file = await (
+            from link in _context.AssessmentFiles.AsNoTracking()
+            join folderFile in _context.CourseFolderFiles.AsNoTracking() on link.FileId equals folderFile.FileId
+            where link.AssessmentId == assessmentId
+                && link.FilePurpose == AssessmentFolderSyncService.PurposeQuestion
+            orderby folderFile.UploadedAt descending
+            select folderFile).FirstOrDefaultAsync();
+
+        if (file == null)
+        {
+            return BadRequest(new { message = "Upload a question paper first, then read questions from it." });
+        }
+
+        var absolute = FolderStoragePath.ResolveExistingFile(_environment, file.FilePath);
+        if (absolute == null || !System.IO.File.Exists(absolute))
+        {
+            return BadRequest(new { message = "The uploaded question paper file was not found on the server." });
+        }
+
+        var parsed = QuestionPaperParser.Parse(await System.IO.File.ReadAllBytesAsync(absolute), file.FileName);
+        var clos = await _context.Clos
+            .AsNoTracking()
+            .Where(c => c.ProgramCourseId == context.ProgramCourseId)
+            .Select(c => new { c.Cloid, c.Clocode })
+            .ToListAsync();
+
+        AssessmentQuestionCloDto[] MapClos(IReadOnlyList<string> codes)
+        {
+            var mapped = new List<AssessmentQuestionCloDto>();
+            foreach (var code in codes.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var clo = clos.FirstOrDefault(c =>
+                    string.Equals(c.Clocode, code, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.Clocode.Replace(" ", ""), code.Replace(" ", ""), StringComparison.OrdinalIgnoreCase));
+                if (clo == null)
+                {
+                    continue;
+                }
+
+                mapped.Add(new AssessmentQuestionCloDto
+                {
+                    CloId = clo.Cloid,
+                    CloCode = clo.Clocode,
+                    Percentage = 0
+                });
+            }
+
+            if (mapped.Count == 1)
+            {
+                mapped[0].Percentage = 100;
+            }
+
+            return mapped.ToArray();
+        }
+
+        return Ok(new ParsedQuestionPaperDto
+        {
+            Message = parsed.Message,
+            Questions = parsed.Questions.Select(q => new ParsedQuestionDraftDto
+            {
+                QuestionNo = q.QuestionNo,
+                QuestionText = q.QuestionText,
+                Marks = q.Marks,
+                CloMappings = MapClos(q.CloCodes).ToList(),
+                Parts = q.Parts.Select(p => new ParsedQuestionDraftDto
+                {
+                    QuestionNo = p.QuestionNo,
+                    QuestionText = p.QuestionText,
+                    Marks = p.Marks,
+                    CloMappings = MapClos(p.CloCodes).ToList()
+                }).ToList()
+            }).ToList()
+        });
     }
 
     [HttpGet("offered-course/{offeredCourseId:int}/available-clos")]
@@ -1129,6 +1225,7 @@ public class AssessmentsController : ControllerBase
 
         if (assessment.IsSetupComplete)
         {
+            await _assessmentFolderSync.SyncQuestionPdfAsync(assessmentId, dto.TeacherUserId);
             return await GetAssessment(assessmentId, dto.TeacherUserId);
         }
 
@@ -1263,6 +1360,7 @@ public class AssessmentsController : ControllerBase
         assessment.IsSetupComplete = true;
         assessment.SetupCompletedAt = DateTime.Now;
         await _context.SaveChangesAsync();
+        await _assessmentFolderSync.SyncQuestionPdfAsync(assessmentId, dto.TeacherUserId);
 
         return await GetAssessment(assessmentId, dto.TeacherUserId);
     }
@@ -2632,6 +2730,11 @@ public class AssessmentsController : ControllerBase
         int teacherUserId,
         string? assessmentTypeName = null)
     {
+        if (GraderAccessService.IsGrader(User))
+        {
+            return false;
+        }
+
         if (context.TeacherUserId == teacherUserId)
         {
             return true;

@@ -12,6 +12,13 @@ namespace FolderManagementSystemAPI.Security;
 /// </summary>
 public sealed class EnforceCallerUserIdFilter : IAsyncActionFilter
 {
+    private readonly GraderAccessService _graderAccess;
+
+    public EnforceCallerUserIdFilter(GraderAccessService graderAccess)
+    {
+        _graderAccess = graderAccess;
+    }
+
     private static readonly string[] UserIdKeys =
     {
         "teacherUserId",
@@ -54,6 +61,7 @@ public sealed class EnforceCallerUserIdFilter : IAsyncActionFilter
         }
 
         var isHod = role.Equals("HOD", StringComparison.OrdinalIgnoreCase);
+        var isGrader = role.Equals("Grader", StringComparison.OrdinalIgnoreCase);
 
         foreach (var key in UserIdKeys)
         {
@@ -69,17 +77,25 @@ public sealed class EnforceCallerUserIdFilter : IAsyncActionFilter
                 continue;
             }
 
-            if (requestedUserId != authenticatedUserId)
+            if (requestedUserId == authenticatedUserId)
             {
-                context.Result = new ObjectResult(new
-                {
-                    message = "You cannot act as another user. The authenticated user does not match the requested user id."
-                })
-                {
-                    StatusCode = StatusCodes.Status403Forbidden
-                };
-                return;
+                continue;
             }
+
+            if (isGrader && IsTeacherUserIdKey(key)
+                && await _graderAccess.CanActAsTeacherAsync(authenticatedUserId, requestedUserId))
+            {
+                continue;
+            }
+
+            context.Result = new ObjectResult(new
+            {
+                message = "You cannot act as another user. The authenticated user does not match the requested user id."
+            })
+            {
+                StatusCode = StatusCodes.Status403Forbidden
+            };
+            return;
         }
 
         await next();

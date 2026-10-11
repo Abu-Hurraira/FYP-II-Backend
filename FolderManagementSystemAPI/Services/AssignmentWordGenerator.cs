@@ -12,6 +12,7 @@ public static class AssignmentWordGenerator
         string Number,
         string Text,
         string? Marks,
+        string? Clos,
         IReadOnlyList<QuestionBlock> Parts);
 
     public static byte[] Generate(
@@ -135,6 +136,7 @@ public static class AssignmentWordGenerator
     private static void AppendQuestion(StringBuilder sb, QuestionBlock question, int level)
     {
         var marks = string.IsNullOrWhiteSpace(question.Marks) ? string.Empty : $" ({question.Marks} marks)";
+        var cloLine = FormatCloLine(question.Clos);
         var number = string.IsNullOrWhiteSpace(question.Number) ? string.Empty : question.Number.Trim();
         var heading = string.IsNullOrWhiteSpace(number)
             ? question.Text
@@ -144,7 +146,12 @@ public static class AssignmentWordGenerator
 
         if (level == 0)
         {
-            sb.Append(Paragraph(heading, bold: true, size: 24, after: 80));
+            sb.Append(Paragraph(heading, bold: true, size: 24, after: string.IsNullOrWhiteSpace(cloLine) ? 80 : 40));
+            if (!string.IsNullOrWhiteSpace(cloLine))
+            {
+                sb.Append(Paragraph(cloLine, bold: true, size: 22, after: 80));
+            }
+
             foreach (var line in SplitLines(question.Text))
             {
                 sb.Append(Paragraph(line, bold: false, size: 24, after: 80, indent: 0));
@@ -152,13 +159,28 @@ public static class AssignmentWordGenerator
         }
         else
         {
-            sb.Append(Paragraph(heading, bold: false, size: 24, after: 80, indent: 240));
+            sb.Append(Paragraph(heading, bold: false, size: 24, after: string.IsNullOrWhiteSpace(cloLine) ? 80 : 40, indent: 240));
+            if (!string.IsNullOrWhiteSpace(cloLine))
+            {
+                sb.Append(Paragraph(cloLine, bold: true, size: 22, after: 80, indent: 240));
+            }
         }
 
         foreach (var part in question.Parts)
         {
             AppendQuestion(sb, part, level + 1);
         }
+    }
+
+    private static string FormatCloLine(string? clos)
+    {
+        var value = (clos ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(value) || value == "—")
+        {
+            return string.Empty;
+        }
+
+        return $"CLO: {value}";
     }
 
     private static IEnumerable<string> SplitLines(string text)

@@ -555,8 +555,8 @@ public class FolderAutoContentService
                 : $"{oc.Course.CourseCode} · {oc.Course.CourseTitle} · {oc.Section.SectionName}";
         }
 
-        var marksPdf = await BuildMarksDistributionPdfAsync(offeredCourseId, teacherUserId, subtitle);
-        if (marksPdf != null)
+        var marksDocx = await BuildMarksDistributionDocxAsync(offeredCourseId, teacherUserId, subtitle);
+        if (marksDocx != null)
         {
             await UpsertPhysicalPdfAsync(
                 folderRecord.CourseFolderId,
@@ -564,8 +564,8 @@ public class FolderAutoContentService
                 "j",
                 teacherUserId,
                 "Marks Distribution and Grading",
-                "marks-distribution.pdf",
-                marksPdf,
+                "Marks-Distribution.docx",
+                marksDocx,
                 PublishedRemark);
         }
 
@@ -621,7 +621,7 @@ public class FolderAutoContentService
         var subtitle = $"{oc.Course.CourseCode} · {oc.Course.CourseTitle} · {oc.Section.SectionName}";
         var key = (section ?? string.Empty).Trim().ToLowerInvariant();
 
-        byte[]? pdf;
+        byte[]? fileBytes;
         string templateCode;
         string fileCategory;
         string fileName;
@@ -630,21 +630,21 @@ public class FolderAutoContentService
         {
             case "marks":
             case "marks-distribution":
-                pdf = await BuildMarksDistributionPdfAsync(offeredCourseId, teacherUserId, subtitle);
+                fileBytes = await BuildMarksDistributionDocxAsync(offeredCourseId, teacherUserId, subtitle);
                 templateCode = "j";
                 fileCategory = "Marks Distribution and Grading";
-                fileName = "marks-distribution.pdf";
+                fileName = "Marks-Distribution.docx";
                 break;
             case "result":
             case "results":
-                pdf = await BuildCourseResultPdfAsync(offeredCourseId, teacherUserId, subtitle);
+                fileBytes = await BuildCourseResultPdfAsync(offeredCourseId, teacherUserId, subtitle);
                 templateCode = "k";
                 fileCategory = "Result";
                 fileName = "course-result.pdf";
                 break;
             case "outcomes":
             case "assessment":
-                pdf = await BuildOutcomesAssessmentPdfAsync(offeredCourseId, teacherUserId, subtitle);
+                fileBytes = await BuildOutcomesAssessmentPdfAsync(offeredCourseId, teacherUserId, subtitle);
                 templateCode = "l";
                 fileCategory = "Outcomes Assessment";
                 fileName = "outcomes-assessment.pdf";
@@ -653,7 +653,7 @@ public class FolderAutoContentService
                 throw new InvalidOperationException("Unknown folder section. Use marks, result, or outcomes.");
         }
 
-        if (pdf == null || pdf.Length == 0)
+        if (fileBytes == null || fileBytes.Length == 0)
         {
             throw new InvalidOperationException(
                 "No data is available yet to save into the submitted folder.");
@@ -666,10 +666,10 @@ public class FolderAutoContentService
             teacherUserId,
             fileCategory,
             fileName,
-            pdf,
+            fileBytes,
             PublishedRemark);
 
-        return (pdf, fileName);
+        return (fileBytes, fileName);
     }
 
     public async Task SavePdfToTemplateAsync(
@@ -1296,7 +1296,7 @@ public class FolderAutoContentService
         sql += $" AND t.ContentStatus IN ({string.Join(", ", parameters)})";
     }
 
-    private async Task<byte[]?> BuildMarksDistributionPdfAsync(
+    private async Task<byte[]?> BuildMarksDistributionDocxAsync(
         int offeredCourseId,
         int teacherUserId,
         string subtitle)
@@ -1311,39 +1311,71 @@ public class FolderAutoContentService
         var homework = await _courseResultService.GetHomeworkSchemeAsync(scope);
         var lab = await _courseResultService.GetLabSchemeAsync(scope);
         var scheme = readiness.Scheme;
-        var sections = new List<(string Heading, IReadOnlyList<string> Headers, IReadOnlyList<IReadOnlyList<string>> Rows)>();
 
-        sections.Add((
-            "Course marking scheme",
-            new[] { "Component", "Max marks" },
-            new List<IReadOnlyList<string>>
-            {
-                new[] { "Homework", FormatNumber(scheme.HomeworkMarks) },
-                new[] { "Mid", FormatNumber(scheme.MidMarks) },
-                new[] { "Lab", FormatNumber(scheme.LabMarks) },
-                new[] { "Final", FormatNumber(scheme.FinalMarks) },
-                new[] { "Total", FormatNumber(scheme.TotalMarks) },
-                new[] { "Assignment best of", scheme.AssignmentBestOf.ToString() },
-                new[] { "Quiz best of", scheme.QuizBestOf.ToString() }
-            }));
-
-        sections.Add((
-            "Homework marks mapping",
-            new[] { "Part", "Marks" },
-            new List<IReadOnlyList<string>>
-            {
-                new[] { "Attendance", FormatNumber(homework.AttendanceMarks) },
-                new[] { "Quiz", FormatNumber(homework.QuizMarks) },
-                new[] { "Assignment", FormatNumber(homework.AssignmentMarks) },
-            }
-            .Concat(homework.ExtraItems.Select(item => (IReadOnlyList<string>)new[] { item.Name, FormatNumber(item.Marks) }))
-            .Append(new[] { "Assigned / target", $"{FormatNumber(homework.AssignedTotal)} / {FormatNumber(homework.TargetMarks)}" })
-            .Append(new[] { "Extra items", FormatNumber(homework.ExtraMarksTotal) })
-            .ToList()));
+        var instruments = new List<MarksDistributionWordGenerator.InstrumentRow>
+        {
+            new(
+                "Quizzes and Assignments",
+                $"{FormatNumber(homework.QuizMarks)} + {FormatNumber(homework.AssignmentMarks)}")
+        };
 
         if (scheme.HasLab)
         {
-            sections.Add((
+            instruments.Add(new(
+                "Lab Marks (Project + Lab Tasks)",
+                $"{FormatNumber(lab.ProjectMarks)} + {FormatNumber(lab.LabTaskMarks)}"));
+        }
+
+        instruments.Add(new("Midterm examination", FormatNumber(scheme.MidMarks)));
+        instruments.Add(new("Terminal examination", FormatNumber(scheme.FinalMarks)));
+
+        var total = scheme.TotalMarks;
+        var gradeA = ThresholdMarks(total, 80m);
+        var gradeB = ThresholdMarks(total, 65m);
+        var gradeC = ThresholdMarks(total, 50m);
+        var gradeD = ThresholdMarks(total, 40m);
+        var gradingScale = new[]
+        {
+            $">={gradeA} : A",
+            $"<{gradeA} and >={gradeB} : B",
+            $"<{gradeB} and >={gradeC} : C",
+            $"<{gradeC} and >={gradeD} : D",
+            $"<{gradeD} : F"
+        };
+
+        var detailSections = new List<MarksDistributionWordGenerator.DetailSection>
+        {
+            new(
+                "Course marking scheme",
+                new[] { "Component", "Max marks" },
+                new List<IReadOnlyList<string>>
+                {
+                    new[] { "Homework", FormatNumber(scheme.HomeworkMarks) },
+                    new[] { "Mid", FormatNumber(scheme.MidMarks) },
+                    new[] { "Lab", FormatNumber(scheme.LabMarks) },
+                    new[] { "Final", FormatNumber(scheme.FinalMarks) },
+                    new[] { "Total", FormatNumber(scheme.TotalMarks) },
+                    new[] { "Assignment best of", scheme.AssignmentBestOf.ToString() },
+                    new[] { "Quiz best of", scheme.QuizBestOf.ToString() }
+                }),
+            new(
+                "Homework marks mapping",
+                new[] { "Part", "Marks" },
+                new List<IReadOnlyList<string>>
+                {
+                    new[] { "Attendance", FormatNumber(homework.AttendanceMarks) },
+                    new[] { "Quiz", FormatNumber(homework.QuizMarks) },
+                    new[] { "Assignment", FormatNumber(homework.AssignmentMarks) },
+                }
+                .Concat(homework.ExtraItems.Select(item => (IReadOnlyList<string>)new[] { item.Name, FormatNumber(item.Marks) }))
+                .Append(new[] { "Assigned / target", $"{FormatNumber(homework.AssignedTotal)} / {FormatNumber(homework.TargetMarks)}" })
+                .Append(new[] { "Extra items", FormatNumber(homework.ExtraMarksTotal) })
+                .ToList())
+        };
+
+        if (scheme.HasLab)
+        {
+            detailSections.Add(new(
                 "Lab marks mapping",
                 new[] { "Part", "Marks" },
                 new List<IReadOnlyList<string>>
@@ -1361,8 +1393,11 @@ public class FolderAutoContentService
                 .ToList()));
         }
 
-        return StructuredPdfGenerator.GenerateSections("Marks Distribution and Grading", subtitle, sections);
+        return MarksDistributionWordGenerator.Generate(subtitle, instruments, gradingScale, detailSections);
     }
+
+    private static string ThresholdMarks(decimal totalMarks, decimal percent) =>
+        FormatNumber(Math.Round(totalMarks * percent / 100m, 0, MidpointRounding.AwayFromZero));
 
     private async Task<byte[]?> BuildCourseResultPdfAsync(
         int offeredCourseId,

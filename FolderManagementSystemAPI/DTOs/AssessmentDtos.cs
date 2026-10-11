@@ -207,6 +207,21 @@ public class AssessmentSummaryDto
     public List<AssessmentSummaryRowDto> Rows { get; set; } = new();
 }
 
+public class ParsedQuestionPaperDto
+{
+    public string Message { get; set; } = string.Empty;
+    public List<ParsedQuestionDraftDto> Questions { get; set; } = new();
+}
+
+public class ParsedQuestionDraftDto
+{
+    public string QuestionNo { get; set; } = string.Empty;
+    public string QuestionText { get; set; } = string.Empty;
+    public decimal? Marks { get; set; }
+    public List<AssessmentQuestionCloDto> CloMappings { get; set; } = new();
+    public List<ParsedQuestionDraftDto> Parts { get; set; } = new();
+}
+
 public class AssessmentSummaryCloDto
 {
     public int CloId { get; set; }

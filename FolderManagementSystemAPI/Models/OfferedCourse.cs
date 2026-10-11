@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -35,4 +35,6 @@ public partial class OfferedCourse
 
     public virtual ICollection<StudentOfferedCourse> StudentOfferedCourses { get; set; } =
         new List<StudentOfferedCourse>();
+
+    public virtual ICollection<GraderCourseTask> GraderCourseTasks { get; set; } = new List<GraderCourseTask>();
 }

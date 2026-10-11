@@ -9,10 +9,27 @@ namespace FolderManagementSystemAPI.Controllers;
 public class CourseResultsController : ControllerBase
 {
     private readonly CourseResultService _service;
+    private readonly GraderAccessService _graderAccess;
 
-    public CourseResultsController(CourseResultService service)
+    public CourseResultsController(CourseResultService service, GraderAccessService graderAccess)
     {
         _service = service;
+        _graderAccess = graderAccess;
+    }
+
+    private async Task<ActionResult?> DenyGraderUnlessComponentAsync(int offeredCourseId)
+    {
+        if (!GraderAccessService.IsGrader(User))
+        {
+            return null;
+        }
+
+        if (!await _graderAccess.CanAccessAsync(User, offeredCourseId, GraderTaskCodes.ComponentMarks))
+        {
+            return BadRequest(new { message = "Component marks are not assigned to you for this course." });
+        }
+
+        return null;
     }
 
     [HttpGet("offered-course/{offeredCourseId:int}/readiness")]
@@ -170,6 +187,11 @@ public class CourseResultsController : ControllerBase
         int offeredCourseId,
         [FromQuery] int teacherUserId)
     {
+        if (await DenyGraderUnlessComponentAsync(offeredCourseId) is { } denied)
+        {
+            return denied;
+        }
+
         var resolved = await _service.TryResolveScopeAsync(offeredCourseId, teacherUserId);
         if (!resolved.Ok || resolved.Scope == null)
         {
@@ -184,6 +206,11 @@ public class CourseResultsController : ControllerBase
         int offeredCourseId,
         SaveComponentMarksDto dto)
     {
+        if (await DenyGraderUnlessComponentAsync(offeredCourseId) is { } denied)
+        {
+            return denied;
+        }
+
         var resolved = await _service.TryResolveScopeAsync(offeredCourseId, dto.TeacherUserId);
         if (!resolved.Ok || resolved.Scope == null)
         {

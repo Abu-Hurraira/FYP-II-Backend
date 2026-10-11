@@ -2,6 +2,7 @@ using System.Globalization;
 using ClosedXML.Excel;
 using FolderManagementSystemAPI.DTOs;
 using FolderManagementSystemAPI.Models;
+using FolderManagementSystemAPI.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using WebApplication1.Models.TeacherScaffold;
@@ -14,11 +15,16 @@ public class AttendanceController : ControllerBase
 {
     private readonly FolderManagementDbContext _context;
     private readonly IWebHostEnvironment _environment;
+    private readonly GraderAccessService _graderAccess;
 
-    public AttendanceController(FolderManagementDbContext context, IWebHostEnvironment environment)
+    public AttendanceController(
+        FolderManagementDbContext context,
+        IWebHostEnvironment environment,
+        GraderAccessService graderAccess)
     {
         _context = context;
         _environment = environment;
+        _graderAccess = graderAccess;
     }
 
     [HttpGet("offered-course/{offeredCourseId:int}")]
@@ -440,6 +446,12 @@ public class AttendanceController : ControllerBase
 
         if (offeredCourse.TeacherUserId == teacherUserId.Value)
         {
+            if (GraderAccessService.IsGrader(User)
+                && !await _graderAccess.CanAccessAsync(User, offeredCourseId, GraderTaskCodes.Attendance))
+            {
+                return (null, BadRequest(new { message = "Attendance is not assigned to you for this course." }));
+            }
+
             return (offeredCourse, null);
         }
 

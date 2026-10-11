@@ -28,6 +28,8 @@ public partial class FolderManagementDbContext : DbContext
 
     public virtual DbSet<GraderAllocation> GraderAllocations { get; set; }
 
+    public virtual DbSet<GraderCourseTask> GraderCourseTasks { get; set; }
+
     public virtual DbSet<OfferedCourse> OfferedCourses { get; set; }
 
     public virtual DbSet<Peo> Peos { get; set; }
@@ -182,6 +184,24 @@ public partial class FolderManagementDbContext : DbContext
             entity.HasOne(d => d.TeacherUser).WithMany(p => p.GraderAllocationTeacherUsers)
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("FK__GraderAll__Teach__68487DD7");
+        });
+
+        modelBuilder.Entity<GraderCourseTask>(entity =>
+        {
+            entity.ToTable("GraderCourseTasks");
+            entity.HasKey(e => e.GraderCourseTaskId);
+            entity.HasIndex(e => new { e.GraderAllocationId, e.OfferedCourseId, e.TaskCode }).IsUnique();
+            entity.Property(e => e.TaskCode).HasMaxLength(50);
+            entity.Property(e => e.TaskTitle).HasMaxLength(200);
+            entity.Property(e => e.AssignedAt).HasColumnType("datetime");
+            entity.HasOne(d => d.GraderAllocation)
+                .WithMany(p => p.GraderCourseTasks)
+                .HasForeignKey(d => d.GraderAllocationId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(d => d.OfferedCourse)
+                .WithMany(p => p.GraderCourseTasks)
+                .HasForeignKey(d => d.OfferedCourseId)
+                .OnDelete(DeleteBehavior.ClientSetNull);
         });
 
         modelBuilder.Entity<OfferedCourse>(entity =>

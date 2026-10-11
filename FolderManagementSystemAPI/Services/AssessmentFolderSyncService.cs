@@ -326,6 +326,11 @@ public class AssessmentFolderSyncService
             return;
         }
 
+        if (await HasTeacherUploadedQuestionPaperAsync(assessmentId))
+        {
+            return;
+        }
+
         var typeName = assessment.AssessmentType?.AssessmentTypeName ?? AssessmentsControllerTypeNames.Assignment;
         var fileCategory = GetQuestionFileCategory(typeName);
         var isAssignment = string.Equals(
@@ -517,18 +522,15 @@ public class AssessmentFolderSyncService
                 .Select(Map)
                 .ToList();
 
-            var clo = question.AssessmentQuestionClomappings
-                .Select(m => m.Clo?.Clocode)
-                .Where(c => !string.IsNullOrWhiteSpace(c))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            if (clo.Count == 0)
+            var clo = FormatQuestionClos(question.AssessmentQuestionClomappings);
+            if (string.IsNullOrWhiteSpace(clo) || clo == "—")
             {
-                clo = parts
+                var rolled = parts
                     .Select(p => p.Clo)
                     .Where(c => !string.IsNullOrWhiteSpace(c) && c != "—")
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
+                clo = rolled.Count == 0 ? "—" : string.Join(", ", rolled);
             }
 
             var number = (question.QuestionNo ?? string.Empty).Trim();
@@ -540,7 +542,7 @@ public class AssessmentFolderSyncService
             return new ExamPaperWordGenerator.ExamQuestion(
                 string.IsNullOrWhiteSpace(number) ? "—" : number,
                 question.QuestionText ?? string.Empty,
-                clo.Count == 0 ? "—" : string.Join(", ", clo),
+                clo,
                 question.Marks?.ToString("0.##") ?? "—",
                 parts);
         }
@@ -581,6 +583,42 @@ public class AssessmentFolderSyncService
         return string.IsNullOrWhiteSpace(fileName) ? "Exam.pdf" : fileName;
     }
 
+    private static string FormatQuestionClos(IEnumerable<AssessmentQuestionClomapping> mappings)
+    {
+        var parts = (mappings ?? Array.Empty<AssessmentQuestionClomapping>())
+            .Select(m =>
+            {
+                var code = m.Clo?.Clocode;
+                if (string.IsNullOrWhiteSpace(code))
+                {
+                    return null;
+                }
+
+                return m.Percentage is > 0
+                    ? $"{code} {m.Percentage.Value.ToString("0.##")}%"
+                    : code;
+            })
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(c => c)
+            .ToList();
+
+        return parts.Count == 0 ? "—" : string.Join(", ", parts);
+    }
+
+    private async Task<bool> HasTeacherUploadedQuestionPaperAsync(int assessmentId)
+    {
+        var remarks = await (
+            from link in _context.AssessmentFiles.AsNoTracking()
+            join file in _context.CourseFolderFiles.AsNoTracking() on link.FileId equals file.FileId
+            where link.AssessmentId == assessmentId && link.FilePurpose == PurposeQuestion
+            select file.Remarks).ToListAsync();
+
+        return remarks.Any(r =>
+            !string.IsNullOrWhiteSpace(r)
+            && r.IndexOf(FolderAutoContentService.PublishedRemark, StringComparison.OrdinalIgnoreCase) < 0);
+    }
+
     private static List<AssignmentWordGenerator.QuestionBlock> BuildAssignmentQuestions(Assessment assessment)
     {
         AssignmentWordGenerator.QuestionBlock Map(AssessmentQuestion question)
@@ -593,10 +631,27 @@ public class AssessmentFolderSyncService
                 .Select(Map)
                 .ToList();
 
+            var clos = FormatQuestionClos(question.AssessmentQuestionClomappings);
+            if (clos == "—")
+            {
+                clos = null;
+            }
+
+            if (string.IsNullOrWhiteSpace(clos) && parts.Count > 0)
+            {
+                var rolled = parts
+                    .Select(p => p.Clos)
+                    .Where(c => !string.IsNullOrWhiteSpace(c) && c != "—")
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                clos = rolled.Count == 0 ? null : string.Join(", ", rolled);
+            }
+
             return new AssignmentWordGenerator.QuestionBlock(
                 question.QuestionNo ?? string.Empty,
                 question.QuestionText ?? string.Empty,
                 question.Marks?.ToString("0.##"),
+                clos,
                 parts);
         }
 

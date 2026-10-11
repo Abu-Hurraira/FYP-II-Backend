@@ -61,6 +61,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 
 builder.Services.AddAuthorization();
 
+builder.Services.AddScoped<GraderAccessService>();
 builder.Services.AddScoped<TeacherPermissionService>();
 builder.Services.AddScoped<HodCoursesDashboardService>();
 builder.Services.AddScoped<SessionScopeService>();
