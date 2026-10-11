@@ -72,7 +72,7 @@ public class PEOPLEMappingsController : ControllerBase
                     {
                         PloId = plo.Ploid,
                         MappingId = mapping?.MappingId,
-                        Percentage = mapping?.Percentage
+                        IsMapped = mapping?.IsMapped == true
                     };
                 }).ToList()
             })
@@ -83,8 +83,7 @@ public class PEOPLEMappingsController : ControllerBase
             ProgramId = programId,
             ProgramName = program.ProgramName,
             Plos = columns,
-            Peos = rows,
-            PeoRowCapacities = BuildPeoRowCapacities(rows)
+            Peos = rows
         });
     }
 
@@ -127,16 +126,6 @@ public class PEOPLEMappingsController : ControllerBase
                 return BadRequest(new { message = $"PLO {cell.PloId} does not belong to this program." });
             }
 
-            if (cell.Percentage.HasValue && (cell.Percentage < 0 || cell.Percentage > 100))
-            {
-                return BadRequest(new { message = "Percentage must be between 0 and 100." });
-            }
-        }
-
-        var validationError = ValidatePeoRowTotals(dto.Cells);
-        if (validationError != null)
-        {
-            return BadRequest(validationError);
         }
 
         var existing = await _context.PeoPlomappings
@@ -145,13 +134,13 @@ public class PEOPLEMappingsController : ControllerBase
 
         _context.PeoPlomappings.RemoveRange(existing);
 
-        foreach (var cell in dto.Cells.Where(c => c.Percentage is > 0))
+        foreach (var cell in dto.Cells.Where(c => c.IsMapped))
         {
             _context.PeoPlomappings.Add(new PeoPlomapping
             {
                 Peoid = cell.PeoId,
                 Ploid = cell.PloId,
-                Percentage = Math.Round(cell.Percentage ?? 0, 2),
+                IsMapped = true,
                 MappedByUserId = dto.MappedByUserId
             });
         }
@@ -194,38 +183,14 @@ public class PEOPLEMappingsController : ControllerBase
             return BadRequest(new { message = $"PLO {dto.PloId} does not belong to this program." });
         }
 
-        if (dto.Percentage.HasValue && (dto.Percentage < 0 || dto.Percentage > 100))
-        {
-            return BadRequest(new { message = "Percentage must be between 0 and 100." });
-        }
-
-        var existingMappings = await _context.PeoPlomappings
-            .Where(m => m.Peoid == dto.PeoId)
-            .ToListAsync();
-
-        var currentCell = existingMappings.FirstOrDefault(m => m.Ploid == dto.PloId);
-        var otherTotal = existingMappings
-            .Where(m => m.Ploid != dto.PloId && m.Percentage is > 0)
-            .Sum(m => m.Percentage ?? 0);
-
-        var newValue = dto.Percentage is > 0 ? dto.Percentage ?? 0 : 0;
-
-        if (Math.Round(otherTotal + newValue, 2) > 100m)
-        {
-            return BadRequest(new
-            {
-                message = "PEO row total cannot exceed 100%.",
-                peoId = dto.PeoId,
-                usedPercentage = Math.Round(otherTotal, 2),
-                remainingPercentage = Math.Round(100m - otherTotal, 2)
-            });
-        }
+        var currentCell = await _context.PeoPlomappings
+            .FirstOrDefaultAsync(m => m.Peoid == dto.PeoId && m.Ploid == dto.PloId);
 
         if (currentCell != null)
         {
-            if (dto.Percentage is > 0)
+            if (dto.IsMapped)
             {
-                currentCell.Percentage = Math.Round(dto.Percentage ?? 0, 2);
+                currentCell.IsMapped = true;
                 currentCell.MappedByUserId = dto.MappedByUserId;
             }
             else
@@ -233,13 +198,13 @@ public class PEOPLEMappingsController : ControllerBase
                 _context.PeoPlomappings.Remove(currentCell);
             }
         }
-        else if (dto.Percentage is > 0)
+        else if (dto.IsMapped)
         {
             _context.PeoPlomappings.Add(new PeoPlomapping
             {
                 Peoid = dto.PeoId,
                 Ploid = dto.PloId,
-                Percentage = Math.Round(dto.Percentage ?? 0, 2),
+                IsMapped = true,
                 MappedByUserId = dto.MappedByUserId
             });
         }
@@ -254,50 +219,6 @@ public class PEOPLEMappingsController : ControllerBase
         return await _context.Users
             .Include(u => u.Role)
             .AnyAsync(u => u.UserId == userId && u.Role.RoleName == "HOD");
-    }
-
-    private static object? ValidatePeoRowTotals(IEnumerable<SavePeoPloMatrixCellDto> cells)
-    {
-        var grouped = cells
-            .Where(c => c.Percentage is > 0)
-            .GroupBy(c => c.PeoId)
-            .Select(g => new
-            {
-                PeoId = g.Key,
-                Total = Math.Round(g.Sum(x => x.Percentage ?? 0), 2)
-            });
-
-        foreach (var row in grouped)
-        {
-            if (row.Total > 100m)
-            {
-                return new
-                {
-                    message = "PEO row total cannot exceed 100%.",
-                    peoId = row.PeoId,
-                    totalPercentage = row.Total
-                };
-            }
-        }
-
-        return null;
-    }
-
-    private static List<PeoRowCapacityDto> BuildPeoRowCapacities(List<PeoPloMatrixRowDto> rows)
-    {
-        return rows.Select(row =>
-        {
-            var used = Math.Round(
-                row.Cells.Where(c => c.Percentage is > 0).Sum(c => c.Percentage ?? 0),
-                2);
-
-            return new PeoRowCapacityDto
-            {
-                PeoId = row.PeoId,
-                UsedPercentage = used,
-                RemainingPercentage = Math.Round(100m - used, 2)
-            };
-        }).ToList();
     }
 
     private static string BuildPloColumnLabel(string ploCode, int index)

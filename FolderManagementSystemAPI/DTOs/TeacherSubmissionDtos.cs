@@ -11,6 +11,10 @@ public class TeacherSubmissionCourseDto
 {
     public int OfferedCourseId { get; set; }
     public int CourseId { get; set; }
+    public int ProgramId { get; set; }
+    public string ProgramName { get; set; } = string.Empty;
+    public string ProgramCode { get; set; } = string.Empty;
+    public string SessionTitle { get; set; } = string.Empty;
     public string CourseTitle { get; set; } = string.Empty;
     public string CourseCode { get; set; } = string.Empty;
     public string SectionName { get; set; } = string.Empty;
@@ -25,6 +29,7 @@ public class TeacherSubmissionCourseDto
 public class CourseFolderOverviewDto
 {
     public int OfferedCourseId { get; set; }
+    public int ProgramCourseId { get; set; }
     public int? CourseFolderId { get; set; }
     public string CourseTitle { get; set; } = string.Empty;
     public string SectionName { get; set; } = string.Empty;
@@ -32,7 +37,9 @@ public class CourseFolderOverviewDto
     public string? RootFolderName { get; set; }
     public string? RootFolderPath { get; set; }
     public string FolderStatus { get; set; } = "Not Created";
+    public string ReviewStatus { get; set; } = "";
     public bool IsCreated { get; set; }
+    public bool IsDraft { get; set; }
     public bool IsLocked { get; set; }
     public TeacherPermissionFlagsDto Permissions { get; set; } = new();
     public List<CourseFolderItemDto> Folders { get; set; } = new();
@@ -60,6 +67,7 @@ public class CourseFolderItemDto
     public string ProgressSummary { get; set; } = string.Empty;
     public List<FolderCategoryProgressDto> CategoryProgress { get; set; } = new();
     public bool IsCustom { get; set; }
+    public bool IsAutoManaged { get; set; }
 }
 
 public class CreateCustomFolderDto
@@ -76,12 +84,14 @@ public class CourseFolderFileDto
     public string FilePath { get; set; } = string.Empty;
     public string FileCategory { get; set; } = string.Empty;
     public string? Remarks { get; set; }
+    public string? ContentPreview { get; set; }
     public DateTime UploadedAt { get; set; }
 }
 
 public class FolderUploadResultDto
 {
     public string Message { get; set; } = string.Empty;
+    public int DirectoryId { get; set; }
     public int FileId { get; set; }
     public string FileName { get; set; } = string.Empty;
     public string FileCategory { get; set; } = string.Empty;

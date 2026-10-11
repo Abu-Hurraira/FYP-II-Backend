@@ -6,13 +6,24 @@ public class CloDto
     public int ProgramCourseId { get; set; }
     public string CloCode { get; set; } = string.Empty;
     public string CloDescription { get; set; } = string.Empty;
+    public string ContentStatus { get; set; } = string.Empty;
 }
 
 public class CreateCloDto
 {
     public int TeacherUserId { get; set; }
+    public int? SessionId { get; set; }
+    public int? OfferedCourseId { get; set; }
     public string? CloCode { get; set; }
     public string CloDescription { get; set; } = string.Empty;
+}
+
+public class UpdateCloDto
+{
+    public int TeacherUserId { get; set; }
+    public string? CloCode { get; set; }
+    public string CloDescription { get; set; } = string.Empty;
+    public int? OfferedCourseId { get; set; }
 }
 
 public class CloImportResultDto

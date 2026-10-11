@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FolderManagementSystemAPI.DTOs;
 using FolderManagementSystemAPI.Models;
@@ -9,6 +9,11 @@ namespace FolderManagementSystemAPI.Controllers
     [ApiController]
     public class AcademicSessionsController : ControllerBase
     {
+        private static readonly HashSet<string> AllowedSeasons = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Fall", "Spring", "Summer"
+        };
+
         private readonly FolderManagementDbContext _context;
 
         public AcademicSessionsController(FolderManagementDbContext context)
@@ -16,9 +21,6 @@ namespace FolderManagementSystemAPI.Controllers
             _context = context;
         }
 
-        // =========================================
-        // GET: All Academic Sessions
-        // =========================================
         [HttpGet]
         public async Task<IActionResult> GetSessions()
         {
@@ -31,24 +33,20 @@ namespace FolderManagementSystemAPI.Controllers
                     ProgramName = s.Program.ProgramName,
                     s.SessionTitle,
                     s.AcademicYear,
-
-                    // Count sections linked to this session
+                    s.StartDate,
                     SectionCount = _context.Sections.Count(sec => sec.SessionId == s.SessionId)
                 })
                 .OrderBy(s => s.ProgramName)
+                .ThenByDescending(s => s.StartDate)
                 .ThenByDescending(s => s.SessionTitle)
                 .ToListAsync();
 
             return Ok(sessions);
         }
 
-        // =========================================
-        // GET: Sessions by Program
-        // =========================================
         [HttpGet("by-program/{programId:int}")]
         public async Task<IActionResult> GetSessionsByProgram(int programId)
         {
-            // Validate program existence
             var programExists = await _context.AcademicPrograms
                 .AnyAsync(p => p.ProgramId == programId);
 
@@ -69,19 +67,16 @@ namespace FolderManagementSystemAPI.Controllers
                     s.ProgramId,
                     s.SessionTitle,
                     s.AcademicYear,
-
-                    // Count related sections
+                    s.StartDate,
                     SectionCount = _context.Sections.Count(sec => sec.SessionId == s.SessionId)
                 })
-                .OrderByDescending(s => s.SessionTitle)
+                .OrderByDescending(s => s.StartDate)
+                .ThenByDescending(s => s.SessionTitle)
                 .ToListAsync();
 
             return Ok(sessions);
         }
 
-        // =========================================
-        // GET: Session by ID
-        // =========================================
         [HttpGet("{id:int}")]
         public async Task<IActionResult> GetSessionById(int id)
         {
@@ -95,8 +90,7 @@ namespace FolderManagementSystemAPI.Controllers
                     ProgramName = s.Program.ProgramName,
                     s.SessionTitle,
                     s.AcademicYear,
-
-                    // Related section count
+                    s.StartDate,
                     SectionCount = _context.Sections.Count(sec => sec.SessionId == s.SessionId)
                 })
                 .FirstOrDefaultAsync();
@@ -113,13 +107,9 @@ namespace FolderManagementSystemAPI.Controllers
             return Ok(session);
         }
 
-        // =========================================
-        // POST: Create Academic Session
-        // =========================================
         [HttpPost]
         public async Task<IActionResult> CreateSession(CreateAcademicSessionDto dto)
         {
-            // Validate ProgramId
             if (dto.ProgramId <= 0)
             {
                 return BadRequest(new
@@ -129,17 +119,6 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            // Validate Session Title
-            if (string.IsNullOrWhiteSpace(dto.SessionTitle))
-            {
-                return BadRequest(new
-                {
-                    success = false,
-                    message = "Session title is required."
-                });
-            }
-
-            // Ensure program exists
             var programExists = await _context.AcademicPrograms
                 .AnyAsync(p => p.ProgramId == dto.ProgramId);
 
@@ -152,9 +131,49 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            var sessionTitle = dto.SessionTitle.Trim();
+            string sessionTitle;
+            DateTime? startDate = dto.StartDate?.Date;
+            string? academicYear = string.IsNullOrWhiteSpace(dto.AcademicYear)
+                ? null
+                : dto.AcademicYear.Trim();
 
-            // Prevent duplicate session in same program
+            if (!string.IsNullOrWhiteSpace(dto.SessionSeason))
+            {
+                var season = NormalizeSeason(dto.SessionSeason);
+                if (season == null)
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Session title must be Fall, Spring, or Summer."
+                    });
+                }
+
+                if (!startDate.HasValue)
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Session start date is required."
+                    });
+                }
+
+                sessionTitle = $"{season} {startDate.Value.Year}";
+                academicYear ??= startDate.Value.Year.ToString();
+            }
+            else if (!string.IsNullOrWhiteSpace(dto.SessionTitle))
+            {
+                sessionTitle = dto.SessionTitle.Trim();
+            }
+            else
+            {
+                return BadRequest(new
+                {
+                    success = false,
+                    message = "Session season and start date are required."
+                });
+            }
+
             var duplicate = await _context.AcademicSessions
                 .AnyAsync(s => s.ProgramId == dto.ProgramId &&
                                s.SessionTitle.ToLower() == sessionTitle.ToLower());
@@ -168,14 +187,12 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            // Create new session entity
             var session = new AcademicSession
             {
                 ProgramId = dto.ProgramId,
                 SessionTitle = sessionTitle,
-                AcademicYear = string.IsNullOrWhiteSpace(dto.AcademicYear)
-                    ? null
-                    : dto.AcademicYear.Trim()
+                AcademicYear = academicYear,
+                StartDate = startDate
             };
 
             _context.AcademicSessions.Add(session);
@@ -190,14 +207,12 @@ namespace FolderManagementSystemAPI.Controllers
                     session.SessionId,
                     session.ProgramId,
                     session.SessionTitle,
-                    session.AcademicYear
+                    session.AcademicYear,
+                    session.StartDate
                 }
             });
         }
 
-        // =========================================
-        // PUT: Update Academic Session
-        // =========================================
         [HttpPut("{id:int}")]
         public async Task<IActionResult> UpdateSession(int id, UpdateAcademicSessionDto dto)
         {
@@ -212,7 +227,6 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            // Validate inputs
             if (dto.ProgramId <= 0)
             {
                 return BadRequest(new
@@ -231,7 +245,6 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            // Validate program existence
             var programExists = await _context.AcademicPrograms
                 .AnyAsync(p => p.ProgramId == dto.ProgramId);
 
@@ -246,7 +259,6 @@ namespace FolderManagementSystemAPI.Controllers
 
             var sessionTitle = dto.SessionTitle.Trim();
 
-            // Prevent duplicate (excluding current session)
             var duplicate = await _context.AcademicSessions
                 .AnyAsync(s =>
                     s.ProgramId == dto.ProgramId &&
@@ -262,7 +274,6 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            // Update fields
             session.ProgramId = dto.ProgramId;
             session.SessionTitle = sessionTitle;
             session.AcademicYear = string.IsNullOrWhiteSpace(dto.AcademicYear)
@@ -278,9 +289,6 @@ namespace FolderManagementSystemAPI.Controllers
             });
         }
 
-        // =========================================
-        // DELETE: Remove Academic Session
-        // =========================================
         [HttpDelete("{id:int}")]
         public async Task<IActionResult> DeleteSession(int id)
         {
@@ -295,7 +303,6 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            // Prevent deletion if dependent sections exist
             var hasSections = await _context.Sections
                 .AnyAsync(s => s.SessionId == id);
 
@@ -316,6 +323,17 @@ namespace FolderManagementSystemAPI.Controllers
                 success = true,
                 message = "Session deleted successfully."
             });
+        }
+
+        private static string? NormalizeSeason(string value)
+        {
+            var trimmed = value.Trim();
+            if (!AllowedSeasons.Contains(trimmed))
+            {
+                return null;
+            }
+
+            return char.ToUpperInvariant(trimmed[0]) + trimmed[1..].ToLowerInvariant();
         }
     }
 }

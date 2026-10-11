@@ -3,8 +3,28 @@ namespace FolderManagementSystemAPI.DTOs;
 public class TeacherPermissionFlagsDto
 {
     public bool CanManageClos { get; set; }
-    public bool CanUploadCourseContent { get; set; }
-    public bool CanUploadExamQuestions { get; set; }
+    public bool CanUploadWeeklyContent { get; set; }
+    public bool CanUploadMidExamQuestions { get; set; }
+    public bool CanUploadFinalExamQuestions { get; set; }
+    public bool CanManageCloPloMapping { get; set; }
+    public bool CanManageCloTaskMapping { get; set; }
+
+    // Backward-compatible aliases used by older clients
+    public bool CanUploadCourseContent
+    {
+        get => CanUploadWeeklyContent;
+        set => CanUploadWeeklyContent = value;
+    }
+
+    public bool CanUploadExamQuestions
+    {
+        get => CanUploadMidExamQuestions || CanUploadFinalExamQuestions;
+        set
+        {
+            CanUploadMidExamQuestions = value;
+            CanUploadFinalExamQuestions = value;
+        }
+    }
 }
 
 public class HodTeacherPermissionRowDto
@@ -15,8 +35,27 @@ public class HodTeacherPermissionRowDto
     public int OfferedCourseId { get; set; }
     public bool IsSectionA { get; set; }
     public bool CanManageClos { get; set; }
-    public bool CanUploadCourseContent { get; set; }
-    public bool CanUploadExamQuestions { get; set; }
+    public bool CanUploadWeeklyContent { get; set; }
+    public bool CanUploadMidExamQuestions { get; set; }
+    public bool CanUploadFinalExamQuestions { get; set; }
+    public bool CanManageCloPloMapping { get; set; }
+    public bool CanManageCloTaskMapping { get; set; }
+
+    public bool CanUploadCourseContent
+    {
+        get => CanUploadWeeklyContent;
+        set => CanUploadWeeklyContent = value;
+    }
+
+    public bool CanUploadExamQuestions
+    {
+        get => CanUploadMidExamQuestions || CanUploadFinalExamQuestions;
+        set
+        {
+            CanUploadMidExamQuestions = value;
+            CanUploadFinalExamQuestions = value;
+        }
+    }
 }
 
 public class HodTeacherPermissionGroupDto
@@ -33,6 +72,15 @@ public class HodTeacherPermissionGroupDto
 public class UpdateTeacherPermissionDto
 {
     public int HodUserId { get; set; }
+    public string PermissionType { get; set; } = string.Empty;
+    public bool IsAllowed { get; set; }
+}
+
+/// <summary>Lightweight toggle response — clients already patch UI optimistically.</summary>
+public class UpdateTeacherPermissionResultDto
+{
+    public bool Ok { get; set; } = true;
+    public int ProgramCourseId { get; set; }
     public string PermissionType { get; set; } = string.Empty;
     public bool IsAllowed { get; set; }
 }

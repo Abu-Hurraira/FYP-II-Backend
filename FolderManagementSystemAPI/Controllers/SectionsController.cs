@@ -2,6 +2,7 @@
 using Microsoft.EntityFrameworkCore;
 using FolderManagementSystemAPI.DTOs;
 using FolderManagementSystemAPI.Models;
+using FolderManagementSystemAPI.Services;
 
 namespace FolderManagementSystemAPI.Controllers
 {
@@ -109,21 +110,11 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            // Validate section name
-            if (string.IsNullOrWhiteSpace(dto.SectionName))
-            {
-                return BadRequest(new
-                {
-                    success = false,
-                    message = "Section name is required."
-                });
-            }
+            var session = await _context.AcademicSessions
+                .Include(s => s.Program)
+                .FirstOrDefaultAsync(s => s.SessionId == dto.SessionId);
 
-            // Ensure session exists
-            var sessionExists = await _context.AcademicSessions
-                .AnyAsync(s => s.SessionId == dto.SessionId);
-
-            if (!sessionExists)
+            if (session == null)
             {
                 return BadRequest(new
                 {
@@ -132,7 +123,16 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            var sectionName = dto.SectionName.Trim();
+            if (!SectionNameFormatter.TryParse(
+                    dto.SectionName,
+                    session.Program?.ProgramCode,
+                    out var parsed,
+                    out var formatError))
+            {
+                return BadRequest(new { success = false, message = formatError });
+            }
+
+            var sectionName = parsed.CanonicalName;
 
             // Prevent duplicate section in same session
             var duplicate = await _context.Sections
@@ -153,7 +153,7 @@ namespace FolderManagementSystemAPI.Controllers
             {
                 SessionId = dto.SessionId,
                 SectionName = sectionName,
-                Semester = dto.Semester,
+                Semester = parsed.Semester,
                 StudentListFilePath = string.IsNullOrWhiteSpace(dto.StudentListFilePath)
                     ? null
                     : dto.StudentListFilePath.Trim(),
@@ -196,17 +196,20 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            // Validate section name
-            if (string.IsNullOrWhiteSpace(dto.SectionName))
+            var session = await _context.AcademicSessions
+                .Include(s => s.Program)
+                .FirstOrDefaultAsync(s => s.SessionId == section.SessionId);
+
+            if (!SectionNameFormatter.TryParse(
+                    dto.SectionName,
+                    session?.Program?.ProgramCode,
+                    out var parsed,
+                    out var formatError))
             {
-                return BadRequest(new
-                {
-                    success = false,
-                    message = "Section name is required."
-                });
+                return BadRequest(new { success = false, message = formatError });
             }
 
-            var sectionName = dto.SectionName.Trim();
+            var sectionName = parsed.CanonicalName;
 
             // Check duplicate section name within same session
             var duplicate = await _context.Sections
@@ -225,7 +228,7 @@ namespace FolderManagementSystemAPI.Controllers
 
             // Update fields
             section.SectionName = sectionName;
-            section.Semester = dto.Semester;
+            section.Semester = parsed.Semester;
 
             section.StudentListFilePath = string.IsNullOrWhiteSpace(dto.StudentListFilePath)
                 ? section.StudentListFilePath

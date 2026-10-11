@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FolderManagementSystemAPI.DTOs;
 using FolderManagementSystemAPI.Models;
+using FolderManagementSystemAPI.Services;
 
 namespace FolderManagementSystemAPI.Controllers
 {
@@ -12,11 +13,15 @@ namespace FolderManagementSystemAPI.Controllers
     public class PEOsController : ControllerBase
     {
         private readonly FolderManagementDbContext _context;
+        private readonly OutcomeCatalogVersionService _outcomeCatalogVersionService;
 
         // Constructor: Injects database context
-        public PEOsController(FolderManagementDbContext context)
+        public PEOsController(
+            FolderManagementDbContext context,
+            OutcomeCatalogVersionService outcomeCatalogVersionService)
         {
             _context = context;
+            _outcomeCatalogVersionService = outcomeCatalogVersionService;
         }
 
         // GET: api/PEOs/by-program/{programId}
@@ -164,6 +169,7 @@ namespace FolderManagementSystemAPI.Controllers
 
             int inserted = 0;
             int skipped = 0;
+            var versionSnapshot = new List<OutcomeCatalogSnapshotItem>();
 
             using var stream = file.OpenReadStream();
             using var workbook = new XLWorkbook(stream);
@@ -207,6 +213,12 @@ namespace FolderManagementSystemAPI.Controllers
                     code = $"PEO-{nextNumber}";
                 }
 
+                versionSnapshot.Add(new OutcomeCatalogSnapshotItem
+                {
+                    ItemCode = code,
+                    ItemDescription = description
+                });
+
                 // Check duplicates
                 var duplicate = await _context.Peos.AnyAsync(p =>
                     p.ProgramId == programId &&
@@ -231,12 +243,30 @@ namespace FolderManagementSystemAPI.Controllers
                 inserted++;
             }
 
+            int? catalogVersionId = null;
+            string? catalogVersionLabel = null;
+            var catalogVersionCreated = false;
+            if (versionSnapshot.Count > 0)
+            {
+                var (version, createdNew) = await _outcomeCatalogVersionService.EnsureVersionFromSnapshotAsync(
+                    OutcomeCatalogTypes.Peo,
+                    programId,
+                    file.FileName,
+                    versionSnapshot);
+                catalogVersionId = version.OutcomeCatalogVersionId;
+                catalogVersionLabel = version.VersionLabel;
+                catalogVersionCreated = createdNew;
+            }
+
             return Ok(new
             {
                 success = true,
                 message = "PEO import completed.",
                 insertedCount = inserted,
-                skippedCount = skipped
+                skippedCount = skipped,
+                catalogVersionId,
+                catalogVersionLabel,
+                catalogVersionCreated
             });
         }
 

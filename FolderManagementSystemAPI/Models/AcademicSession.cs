@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -20,6 +20,9 @@ public partial class AcademicSession
 
     [StringLength(50)]
     public string? AcademicYear { get; set; }
+
+    [Column(TypeName = "date")]
+    public DateTime? StartDate { get; set; }
 
     [ForeignKey("ProgramId")]
     [InverseProperty("AcademicSessions")]

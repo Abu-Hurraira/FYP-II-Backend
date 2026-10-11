@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace WebApplication1.Models.TeacherScaffold;
 
@@ -8,6 +9,9 @@ public partial class CourseTopic
     public int TopicId { get; set; }
 
     public int ProgramCourseId { get; set; }
+
+    [Column("SessionID")]
+    public int SessionId { get; set; }
 
     public int? ParentTopicId { get; set; }
 
@@ -18,6 +22,10 @@ public partial class CourseTopic
     public string? TopicDescription { get; set; }
 
     public int? DisplayOrder { get; set; }
+
+    public string ContentStatus { get; set; } = "Draft";
+
+    public int? SubmissionId { get; set; }
 
     public virtual ICollection<CourseTopicClomapping> CourseTopicClomappings { get; set; } = new List<CourseTopicClomapping>();
 

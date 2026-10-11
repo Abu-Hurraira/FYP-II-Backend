@@ -410,29 +410,90 @@ public class ProgramCoursePLOMappingsController : ControllerBase
             return NotFound(new { message = "Program course not found." });
         }
 
-        var hasOfferings = await _context.OfferedCourses
-            .Include(oc => oc.Section)
-            .AnyAsync(oc =>
-                oc.CourseId == programCourse.CourseId &&
-                oc.Section.Session.ProgramId == programCourse.ProgramId);
+        var courseId = programCourse.CourseId;
+        var course = await _context.Courses.FindAsync(courseId);
+        var courseLabel = course == null
+            ? $"course #{courseId}"
+            : $"{course.CourseCode} — {course.CourseTitle}";
 
-        if (hasOfferings)
+        // Offered in any section → cannot delete from database.
+        var isOffered = await _context.OfferedCourses.AnyAsync(oc => oc.CourseId == courseId);
+        if (isOffered)
         {
             return BadRequest(new
             {
-                message = "Cannot remove a course that has offered sections in this program."
+                message = $"Cannot remove course ({courseLabel}): it is already offered in a section."
             });
         }
 
-        var mappings = await _context.ProgramCoursePlomappings
-            .Where(m => m.ProgramCourseId == programCourseId)
+        // PLO-mapped (any mapped tick / percentage > 0 on this program link) → cannot delete.
+        var isPloMapped = await _context.ProgramCoursePlomappings.AnyAsync(m =>
+            m.ProgramCourseId == programCourseId && m.Percentage != null && m.Percentage > 0);
+        if (isPloMapped)
+        {
+            return BadRequest(new
+            {
+                message = $"Cannot remove course ({courseLabel}): it is mapped to one or more PLOs."
+            });
+        }
+
+        // Also block if CLOs exist for this program-course (content already started).
+        var hasClos = await _context.Clos.AnyAsync(c => c.ProgramCourseId == programCourseId);
+        if (hasClos)
+        {
+            return BadRequest(new
+            {
+                message = $"Cannot remove course ({courseLabel}): CLOs are already defined for it."
+            });
+        }
+
+        // Clear empty/zero PLO mapping rows, then remove every program link for this course,
+        // then delete the course row itself.
+        var allProgramCourseIds = await _context.AcademicProgramCourses
+            .Where(pc => pc.CourseId == courseId)
+            .Select(pc => pc.ProgramCourseId)
             .ToListAsync();
 
-        _context.ProgramCoursePlomappings.RemoveRange(mappings);
-        _context.AcademicProgramCourses.Remove(programCourse);
+        // If another program has this course PLO-mapped, block (shared Courses row).
+        var mappedElsewhere = await _context.ProgramCoursePlomappings.AnyAsync(m =>
+            allProgramCourseIds.Contains(m.ProgramCourseId) &&
+            m.Percentage != null &&
+            m.Percentage > 0);
+        if (mappedElsewhere)
+        {
+            return BadRequest(new
+            {
+                message = $"Cannot remove course ({courseLabel}): it is mapped to PLOs in another program."
+            });
+        }
+
+        var leftoverMappings = await _context.ProgramCoursePlomappings
+            .Where(m => allProgramCourseIds.Contains(m.ProgramCourseId))
+            .ToListAsync();
+        _context.ProgramCoursePlomappings.RemoveRange(leftoverMappings);
+
+        var permissions = await _context.TeacherPermissions
+            .Where(p => allProgramCourseIds.Contains(p.ProgramCourseId))
+            .ToListAsync();
+        _context.TeacherPermissions.RemoveRange(permissions);
+
+        var programLinks = await _context.AcademicProgramCourses
+            .Where(pc => pc.CourseId == courseId)
+            .ToListAsync();
+        _context.AcademicProgramCourses.RemoveRange(programLinks);
+
+        if (course != null)
+        {
+            _context.Courses.Remove(course);
+        }
+
         await _context.SaveChangesAsync();
 
-        return Ok(new { success = true, message = "Program course removed successfully." });
+        return Ok(new
+        {
+            success = true,
+            message = "Course removed from the database successfully."
+        });
     }
 
     [HttpGet("program-course/{programCourseId:int}")]

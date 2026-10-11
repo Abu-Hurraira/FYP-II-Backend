@@ -19,6 +19,13 @@ public partial class Assessment
 
     public decimal? TotalMarks { get; set; }
 
+    /// <summary>
+    /// When true, questions/meta are locked for marking and the section mark sheet is available.
+    /// </summary>
+    public bool IsSetupComplete { get; set; }
+
+    public DateTime? SetupCompletedAt { get; set; }
+
     public int CreatedByUserId { get; set; }
 
     public DateTime CreatedAt { get; set; }

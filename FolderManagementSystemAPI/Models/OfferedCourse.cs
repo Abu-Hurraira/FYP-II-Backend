@@ -32,4 +32,7 @@ public partial class OfferedCourse
     [ForeignKey("TeacherUserId")]
     [InverseProperty("OfferedCourses")]
     public virtual User TeacherUser { get; set; } = null!;
+
+    public virtual ICollection<StudentOfferedCourse> StudentOfferedCourses { get; set; } =
+        new List<StudentOfferedCourse>();
 }

@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
 using WebApplication1.Models.TeacherScaffold;
@@ -18,6 +18,14 @@ public partial class FolderManagementDbContext : DbContext
 
     public virtual DbSet<Course> Courses { get; set; }
 
+    public virtual DbSet<CourseCatalogVersion> CourseCatalogVersions { get; set; }
+
+    public virtual DbSet<CourseCatalogVersionItem> CourseCatalogVersionItems { get; set; }
+
+    public virtual DbSet<OutcomeCatalogVersion> OutcomeCatalogVersions { get; set; }
+
+    public virtual DbSet<OutcomeCatalogVersionItem> OutcomeCatalogVersionItems { get; set; }
+
     public virtual DbSet<GraderAllocation> GraderAllocations { get; set; }
 
     public virtual DbSet<OfferedCourse> OfferedCourses { get; set; }
@@ -31,6 +39,8 @@ public partial class FolderManagementDbContext : DbContext
     public virtual DbSet<Section> Sections { get; set; }
 
     public virtual DbSet<Student> Students { get; set; }
+
+    public virtual DbSet<StudentOfferedCourse> StudentOfferedCourses { get; set; }
 
     public virtual DbSet<User> Users { get; set; }
 
@@ -54,7 +64,11 @@ public partial class FolderManagementDbContext : DbContext
 
     public virtual DbSet<CloattainmentResult> CloattainmentResults { get; set; }
 
+    public virtual DbSet<PloattainmentResult> PloattainmentResults { get; set; }
+
     public virtual DbSet<CourseAssessmentTypeClomapping> CourseAssessmentTypeClomappings { get; set; }
+
+    public virtual DbSet<CourseSessionTaskType> CourseSessionTaskTypes { get; set; }
 
     public virtual DbSet<CourseFolder> CourseFolders { get; set; }
 
@@ -90,12 +104,54 @@ public partial class FolderManagementDbContext : DbContext
 
     public virtual DbSet<StudentQuestionMark> StudentQuestionMarks { get; set; }
 
+    public virtual DbSet<OfferedCourseResultScheme> OfferedCourseResultSchemes { get; set; }
+
+    public virtual DbSet<OfferedCourseLabMarkScheme> OfferedCourseLabMarkSchemes { get; set; }
+
+    public virtual DbSet<OfferedCourseHomeworkMarkScheme> OfferedCourseHomeworkMarkSchemes { get; set; }
+
+    public virtual DbSet<StudentCourseResult> StudentCourseResults { get; set; }
+
+    public virtual DbSet<StudentCourseResultSelection> StudentCourseResultSelections { get; set; }
+
+    public virtual DbSet<StudentComponentMark> StudentComponentMarks { get; set; }
+
+    public virtual DbSet<FcarReportInput> FcarReportInputs { get; set; }
+
+    public virtual DbSet<HodUploadAllocation> HodUploadAllocations { get; set; }
+
     public virtual DbSet<TeacherPermission> TeacherPermissions { get; set; }
 
     public virtual DbSet<TeacherPermissionType> TeacherPermissionTypes { get; set; }
 
+    public virtual DbSet<ContentSubmissionType> ContentSubmissionTypes { get; set; }
+
+    public virtual DbSet<ProgramCourseContentSubmission> ProgramCourseContentSubmissions { get; set; }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<FcarReportInput>(entity =>
+        {
+            entity.HasIndex(e => e.OfferedCourseId).IsUnique();
+            entity.Property(e => e.CatalogDescription).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.CourseModifications).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.StudentFeedbackText).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.ReflectionText).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.ProposedActionsText).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysutcdatetime())");
+        });
+
+        modelBuilder.Entity<HodUploadAllocation>(entity =>
+        {
+            entity.ToTable("HodUploadAllocations");
+            entity.HasKey(e => e.OfferedCourseId);
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("(sysutcdatetime())");
+            entity.HasOne(e => e.OfferedCourse)
+                .WithMany()
+                .HasForeignKey(e => e.OfferedCourseId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         modelBuilder.Entity<AcademicProgram>(entity =>
         {
             entity.HasKey(e => e.ProgramId).HasName("PK__Academic__752560382CF64A69");
@@ -186,6 +242,28 @@ public partial class FolderManagementDbContext : DbContext
                 .HasConstraintName("FK__Students__Sectio__5AEE82B9");
         });
 
+        modelBuilder.Entity<StudentOfferedCourse>(entity =>
+        {
+            entity.HasKey(e => e.StudentOfferedCourseId).HasName("PK_StudentOfferedCourses");
+
+            entity.HasIndex(e => new { e.StudentId, e.OfferedCourseId }, "UQ_StudentOfferedCourses_Student_Offered")
+                .IsUnique();
+
+            entity.Property(e => e.StudentOfferedCourseId).HasColumnName("StudentOfferedCourseID");
+            entity.Property(e => e.StudentId).HasColumnName("StudentID");
+            entity.Property(e => e.OfferedCourseId).HasColumnName("OfferedCourseID");
+
+            entity.HasOne(d => d.Student).WithMany(p => p.StudentOfferedCourses)
+                .HasForeignKey(d => d.StudentId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("FK_StudentOfferedCourses_Student");
+
+            entity.HasOne(d => d.OfferedCourse).WithMany(p => p.StudentOfferedCourses)
+                .HasForeignKey(d => d.OfferedCourseId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("FK_StudentOfferedCourses_OfferedCourse");
+        });
+
         modelBuilder.Entity<User>(entity =>
         {
             entity.HasKey(e => e.UserId).HasName("PK__Users__1788CCAC72E4EBE2");
@@ -221,6 +299,8 @@ public partial class FolderManagementDbContext : DbContext
             entity.Property(e => e.OfferedCourseId).HasColumnName("OfferedCourseID");
             entity.Property(e => e.Title).HasMaxLength(200);
             entity.Property(e => e.TotalMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.IsSetupComplete).HasDefaultValue(false);
+            entity.Property(e => e.SetupCompletedAt).HasColumnType("datetime");
 
             entity.HasOne(d => d.AssessmentType).WithMany(p => p.Assessments)
                 .HasForeignKey(d => d.AssessmentTypeId)
@@ -258,6 +338,8 @@ public partial class FolderManagementDbContext : DbContext
 
             entity.Property(e => e.QuestionId).HasColumnName("QuestionID");
             entity.Property(e => e.AssessmentId).HasColumnName("AssessmentID");
+            entity.Property(e => e.ParentQuestionId).HasColumnName("ParentQuestionID");
+            entity.Property(e => e.DisplayOrder);
             entity.Property(e => e.Marks).HasColumnType("decimal(6, 2)");
             entity.Property(e => e.QuestionNo).HasMaxLength(50);
             entity.Property(e => e.QuestionText).HasMaxLength(1000);
@@ -266,6 +348,11 @@ public partial class FolderManagementDbContext : DbContext
                 .HasForeignKey(d => d.AssessmentId)
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("FK__Assessmen__Asses__4F47C5E3");
+
+            entity.HasOne(d => d.ParentQuestion).WithMany(p => p.InverseParentQuestion)
+                .HasForeignKey(d => d.ParentQuestionId)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_AssessmentQuestions_Parent");
         });
 
         modelBuilder.Entity<AssessmentQuestionClomapping>(entity =>
@@ -337,7 +424,9 @@ public partial class FolderManagementDbContext : DbContext
 
             entity.ToTable("CLOs");
 
-            entity.HasIndex(e => new { e.ProgramCourseId, e.Clocode }, "UQ__CLOs__6D75512123F6DAD9").IsUnique();
+            entity.HasIndex(e => new { e.ProgramCourseId, e.SessionId, e.Clocode }, "UQ_CLOs_Session_Code")
+                .IsUnique()
+                .HasFilter("[SessionID] IS NOT NULL");
 
             entity.Property(e => e.Cloid).HasColumnName("CLOID");
             entity.Property(e => e.Clocode)
@@ -347,6 +436,11 @@ public partial class FolderManagementDbContext : DbContext
                 .HasMaxLength(1000)
                 .HasColumnName("CLODescription");
             entity.Property(e => e.ProgramCourseId).HasColumnName("ProgramCourseID");
+            entity.Property(e => e.SessionId).HasColumnName("SessionID");
+            entity.Property(e => e.ContentStatus)
+                .HasMaxLength(20)
+                .HasDefaultValue("Draft");
+            entity.Property(e => e.SubmissionId).HasColumnName("SubmissionID");
 
             entity.HasOne(d => d.ProgramCourse).WithMany(p => p.Clos)
                 .HasForeignKey(d => d.ProgramCourseId)
@@ -377,20 +471,46 @@ public partial class FolderManagementDbContext : DbContext
                 .HasConstraintName("FK__CLOAttain__CLOID__6CD828CA");
         });
 
+        modelBuilder.Entity<PloattainmentResult>(entity =>
+        {
+            entity.HasKey(e => e.AttainmentId).HasName("PK_PLOAttainmentResults");
+
+            entity.ToTable("PLOAttainmentResults");
+
+            entity.HasIndex(e => new { e.OfferedCourseId, e.Ploid }, "UQ_PLOAttainmentResults_OfferedCourse_PLO").IsUnique();
+
+            entity.Property(e => e.AttainmentId).HasColumnName("AttainmentID");
+            entity.Property(e => e.AttainmentPercentage).HasColumnType("decimal(5, 2)");
+            entity.Property(e => e.CalculatedAt)
+                .HasDefaultValueSql("(getdate())")
+                .HasColumnType("datetime");
+            entity.Property(e => e.CalculatedByUserId).HasColumnName("CalculatedByUserID");
+            entity.Property(e => e.Ploid).HasColumnName("PLOID");
+            entity.Property(e => e.OfferedCourseId).HasColumnName("OfferedCourseID");
+
+            entity.HasOne(d => d.Plo).WithMany()
+                .HasForeignKey(d => d.Ploid)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK_PLOAttainmentResults_PLO");
+        });
+
         modelBuilder.Entity<CourseAssessmentTypeClomapping>(entity =>
         {
             entity.HasKey(e => e.MappingId).HasName("PK__CourseAs__8B5781BD30AEC392");
 
             entity.ToTable("CourseAssessmentTypeCLOMappings");
 
-            entity.HasIndex(e => new { e.ProgramCourseId, e.AssessmentTypeId, e.Cloid }, "UQ__CourseAs__21F2B9550A43881A").IsUnique();
+            entity.HasIndex(e => new { e.ProgramCourseId, e.SessionId, e.AssessmentTypeId, e.Cloid }, "UQ_CourseAssessmentTypeCLOMappings_Session").IsUnique();
 
             entity.Property(e => e.MappingId).HasColumnName("MappingID");
             entity.Property(e => e.AssessmentTypeId).HasColumnName("AssessmentTypeID");
             entity.Property(e => e.Cloid).HasColumnName("CLOID");
             entity.Property(e => e.Percentage).HasColumnType("decimal(5, 2)");
             entity.Property(e => e.ProgramCourseId).HasColumnName("ProgramCourseID");
+            entity.Property(e => e.SessionId).HasColumnName("SessionID");
             entity.Property(e => e.UpdatedByUserId).HasColumnName("UpdatedByUserID");
+            entity.Property(e => e.ContentStatus).HasMaxLength(30);
+            entity.Property(e => e.SubmissionId).HasColumnName("SubmissionID");
 
             entity.HasOne(d => d.AssessmentType).WithMany(p => p.CourseAssessmentTypeClomappings)
                 .HasForeignKey(d => d.AssessmentTypeId)
@@ -406,6 +526,29 @@ public partial class FolderManagementDbContext : DbContext
                 .HasForeignKey(d => d.ProgramCourseId)
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("FK__CourseAss__Progr__19DFD96B");
+        });
+
+        modelBuilder.Entity<CourseSessionTaskType>(entity =>
+        {
+            entity.ToTable("CourseSessionTaskTypes");
+            entity.HasKey(e => e.CourseSessionTaskTypeId);
+            entity.HasIndex(e => new { e.ProgramCourseId, e.SessionId, e.AssessmentTypeId })
+                .IsUnique();
+            entity.Property(e => e.CourseSessionTaskTypeId).HasColumnName("CourseSessionTaskTypeID");
+            entity.Property(e => e.ProgramCourseId).HasColumnName("ProgramCourseID");
+            entity.Property(e => e.SessionId).HasColumnName("SessionID");
+            entity.Property(e => e.AssessmentTypeId).HasColumnName("AssessmentTypeID");
+            entity.Property(e => e.CreatedAt).HasColumnType("datetime");
+
+            entity.HasOne(d => d.AssessmentType)
+                .WithMany()
+                .HasForeignKey(d => d.AssessmentTypeId)
+                .OnDelete(DeleteBehavior.ClientSetNull);
+
+            entity.HasOne(d => d.ProgramCourse)
+                .WithMany()
+                .HasForeignKey(d => d.ProgramCourseId)
+                .OnDelete(DeleteBehavior.ClientSetNull);
         });
 
         modelBuilder.Entity<CourseFolder>(entity =>
@@ -504,13 +647,20 @@ public partial class FolderManagementDbContext : DbContext
         {
             entity.HasKey(e => e.TopicId).HasName("PK__CourseTo__022E0F7D90057FFE");
 
-            entity.HasIndex(e => new { e.ProgramCourseId, e.ParentTopicId, e.TopicTitle }, "UQ__CourseTo__4A97F2CC616D30D3").IsUnique();
+            entity.HasIndex(e => new { e.ProgramCourseId, e.SessionId, e.ParentTopicId, e.TopicTitle }, "UQ_CourseTopics_Session")
+                .IsUnique()
+                .HasFilter("[SessionID] IS NOT NULL");
 
             entity.Property(e => e.TopicId).HasColumnName("TopicID");
             entity.Property(e => e.ParentTopicId).HasColumnName("ParentTopicID");
             entity.Property(e => e.ProgramCourseId).HasColumnName("ProgramCourseID");
+            entity.Property(e => e.SessionId).HasColumnName("SessionID");
             entity.Property(e => e.TopicDescription).HasMaxLength(1000);
             entity.Property(e => e.TopicTitle).HasMaxLength(300);
+            entity.Property(e => e.ContentStatus)
+                .HasMaxLength(20)
+                .HasDefaultValue("Draft");
+            entity.Property(e => e.SubmissionId).HasColumnName("SubmissionID");
 
             entity.HasOne(d => d.ParentTopic).WithMany(p => p.InverseParentTopic)
                 .HasForeignKey(d => d.ParentTopicId)
@@ -670,19 +820,30 @@ public partial class FolderManagementDbContext : DbContext
 
             entity.ToTable("PLOCLOMappings");
 
-            entity.HasIndex(e => new { e.ProgramCourseId, e.Ploid, e.Cloid }, "UQ__PLOCLOMa__15875FEC3457CF94").IsUnique();
+            entity.HasIndex(e => new { e.ProgramCourseId, e.SessionId, e.Ploid, e.Cloid }, "UQ_PLOCLOMappings_Session")
+                .IsUnique()
+                .HasFilter("[SessionID] IS NOT NULL");
 
             entity.Property(e => e.MappingId).HasColumnName("MappingID");
             entity.Property(e => e.Cloid).HasColumnName("CLOID");
             entity.Property(e => e.Percentage).HasColumnType("decimal(5, 2)");
             entity.Property(e => e.Ploid).HasColumnName("PLOID");
             entity.Property(e => e.ProgramCourseId).HasColumnName("ProgramCourseID");
+            entity.Property(e => e.SessionId).HasColumnName("SessionID");
             entity.Property(e => e.UpdatedByUserId).HasColumnName("UpdatedByUserID");
+            entity.Property(e => e.ContentStatus)
+                .HasMaxLength(20)
+                .HasDefaultValue("Draft");
+            entity.Property(e => e.SubmissionId).HasColumnName("SubmissionID");
 
             entity.HasOne(d => d.Clo).WithMany(p => p.Ploclomappings)
                 .HasForeignKey(d => d.Cloid)
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("FK__PLOCLOMap__CLOID__236943A5");
+
+            entity.HasOne(d => d.Plo).WithMany()
+                .HasForeignKey(d => d.Ploid)
+                .OnDelete(DeleteBehavior.ClientSetNull);
 
             entity.HasOne(d => d.ProgramCourse).WithMany(p => p.Ploclomappings)
                 .HasForeignKey(d => d.ProgramCourseId)
@@ -717,8 +878,8 @@ public partial class FolderManagementDbContext : DbContext
             entity.ToTable("PEOPLEMappings");
 
             entity.Property(e => e.MappingId).HasColumnName("MappingID");
+            entity.Property(e => e.IsMapped).HasColumnName("IsMapped");
             entity.Property(e => e.MappedByUserId).HasColumnName("MappedByUserID");
-            entity.Property(e => e.Percentage).HasColumnType("decimal(5, 2)");
             entity.Property(e => e.Peoid).HasColumnName("PEOID");
             entity.Property(e => e.Ploid).HasColumnName("PLOID");
         });
@@ -788,6 +949,174 @@ public partial class FolderManagementDbContext : DbContext
 
             entity.Property(e => e.PermissionTypeId).HasColumnName("PermissionTypeID");
             entity.Property(e => e.PermissionType).HasMaxLength(100);
+        });
+
+        modelBuilder.Entity<ContentSubmissionType>(entity =>
+        {
+            entity.HasKey(e => e.ContentTypeId);
+            entity.ToTable("ContentSubmissionTypes");
+            entity.Property(e => e.ContentTypeId).HasColumnName("ContentTypeID");
+            entity.Property(e => e.ContentTypeCode).HasMaxLength(50);
+            entity.Property(e => e.ContentTypeName).HasMaxLength(100);
+        });
+
+        modelBuilder.Entity<ProgramCourseContentSubmission>(entity =>
+        {
+            entity.HasKey(e => e.SubmissionId);
+            entity.ToTable("ProgramCourseContentSubmissions");
+            entity.Property(e => e.SubmissionId).HasColumnName("SubmissionID");
+            entity.Property(e => e.ProgramCourseId).HasColumnName("ProgramCourseID");
+            entity.Property(e => e.SessionId).HasColumnName("SessionID");
+            entity.Property(e => e.ContentTypeId).HasColumnName("ContentTypeID");
+            entity.Property(e => e.SubmittedByUserId).HasColumnName("SubmittedByUserID");
+            entity.Property(e => e.SubmittedAt).HasColumnType("datetime");
+            entity.Property(e => e.SubmissionStatus).HasMaxLength(30);
+            entity.Property(e => e.ReviewedByUserId).HasColumnName("ReviewedByUserID");
+            entity.Property(e => e.ReviewedAt).HasColumnType("datetime");
+            entity.Property(e => e.HodFeedback).HasMaxLength(1000);
+
+            entity.HasOne(d => d.ContentType).WithMany(p => p.Submissions)
+                .HasForeignKey(d => d.ContentTypeId)
+                .OnDelete(DeleteBehavior.ClientSetNull);
+
+            entity.HasOne(d => d.Session).WithMany()
+                .HasForeignKey(d => d.SessionId)
+                .OnDelete(DeleteBehavior.ClientSetNull);
+
+            entity.HasOne(d => d.SubmittedByUser).WithMany()
+                .HasForeignKey(d => d.SubmittedByUserId)
+                .OnDelete(DeleteBehavior.ClientSetNull);
+
+            entity.HasOne(d => d.ReviewedByUser).WithMany()
+                .HasForeignKey(d => d.ReviewedByUserId);
+        });
+
+        modelBuilder.Entity<OfferedCourseResultScheme>(entity =>
+        {
+            entity.ToTable("OfferedCourseResultSchemes");
+            entity.HasIndex(e => e.OfferedCourseId).IsUnique();
+            entity.Property(e => e.TotalMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.QuizMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.HomeworkMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.MidMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.LabMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.FinalTheoryMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.FinalLabMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.AttendanceHomeworkMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.UpdatedAt).HasColumnType("datetime");
+            entity.Property(e => e.LastGeneratedAt).HasColumnType("datetime");
+        });
+
+        modelBuilder.Entity<StudentCourseResult>(entity =>
+        {
+            entity.ToTable("StudentCourseResults");
+            entity.HasIndex(e => new { e.OfferedCourseId, e.StudentId }).IsUnique();
+            entity.Property(e => e.QuizMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.HomeworkMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.MidMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.LabMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.FinalTheoryMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.FinalLabMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.TotalObtained).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.TotalMax).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.Percentage).HasColumnType("decimal(5, 2)");
+            entity.Property(e => e.GeneratedAt).HasColumnType("datetime");
+        });
+
+        modelBuilder.Entity<StudentComponentMark>(entity =>
+        {
+            entity.ToTable("StudentComponentMarks");
+            entity.HasIndex(e => new { e.OfferedCourseId, e.StudentId }).IsUnique();
+            entity.Property(e => e.AttendancePercent).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.LabTaskObtained).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.ProjectObtained).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.ExtraMarksJson).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.UpdatedAt).HasColumnType("datetime2");
+        });
+
+        modelBuilder.Entity<OfferedCourseLabMarkScheme>(entity =>
+        {
+            entity.ToTable("OfferedCourseLabMarkSchemes");
+            entity.Property(e => e.QuizMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.AssignmentMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.LabTaskMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.ProjectMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.AttendanceMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.ExamMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.ExtraItemsJson).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.UpdatedAt).HasColumnType("datetime");
+        });
+
+        modelBuilder.Entity<OfferedCourseHomeworkMarkScheme>(entity =>
+        {
+            entity.ToTable("OfferedCourseHomeworkMarkSchemes");
+            entity.Property(e => e.AttendanceMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.QuizMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.AssignmentMarks).HasColumnType("decimal(6, 2)");
+            entity.Property(e => e.ExtraItemsJson).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.UpdatedAt).HasColumnType("datetime");
+        });
+
+        modelBuilder.Entity<StudentCourseResultSelection>(entity =>
+        {
+            entity.ToTable("StudentCourseResultSelections");
+            entity.HasIndex(e => new { e.OfferedCourseId, e.StudentId, e.AssessmentId }).IsUnique();
+            entity.Property(e => e.Category).HasMaxLength(20);
+        });
+
+        modelBuilder.Entity<CourseCatalogVersion>(entity =>
+        {
+            entity.ToTable("CourseCatalogVersions");
+            entity.HasIndex(e => new { e.SourceProgramId, e.CreatedAt });
+            entity.HasIndex(e => new { e.SourceProgramId, e.ContentFingerprint });
+            entity.Property(e => e.VersionLabel).HasMaxLength(200);
+            entity.Property(e => e.SourceFileName).HasMaxLength(260);
+            entity.Property(e => e.ContentFingerprint).HasMaxLength(64);
+            entity.Property(e => e.CreatedAt).HasColumnType("datetime2");
+            entity.HasOne(e => e.SourceProgram)
+                .WithMany()
+                .HasForeignKey(e => e.SourceProgramId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<CourseCatalogVersionItem>(entity =>
+        {
+            entity.ToTable("CourseCatalogVersionItems");
+            entity.HasIndex(e => new { e.CatalogVersionId, e.DisplayOrder });
+            entity.Property(e => e.CourseCode).HasMaxLength(50);
+            entity.Property(e => e.CourseTitle).HasMaxLength(200);
+            entity.HasOne(e => e.Version)
+                .WithMany(v => v.Items)
+                .HasForeignKey(e => e.CatalogVersionId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<OutcomeCatalogVersion>(entity =>
+        {
+            entity.ToTable("OutcomeCatalogVersions");
+            entity.HasIndex(e => new { e.OutcomeType, e.SourceProgramId, e.CreatedAt });
+            entity.HasIndex(e => new { e.OutcomeType, e.SourceProgramId, e.ContentFingerprint });
+            entity.Property(e => e.OutcomeType).HasMaxLength(10);
+            entity.Property(e => e.VersionLabel).HasMaxLength(200);
+            entity.Property(e => e.SourceFileName).HasMaxLength(260);
+            entity.Property(e => e.ContentFingerprint).HasMaxLength(64);
+            entity.Property(e => e.CreatedAt).HasColumnType("datetime2");
+            entity.HasOne(e => e.SourceProgram)
+                .WithMany()
+                .HasForeignKey(e => e.SourceProgramId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<OutcomeCatalogVersionItem>(entity =>
+        {
+            entity.ToTable("OutcomeCatalogVersionItems");
+            entity.HasIndex(e => new { e.OutcomeCatalogVersionId, e.DisplayOrder });
+            entity.Property(e => e.ItemCode).HasMaxLength(20);
+            entity.Property(e => e.ItemDescription).HasMaxLength(1000);
+            entity.HasOne(e => e.Version)
+                .WithMany(v => v.Items)
+                .HasForeignKey(e => e.OutcomeCatalogVersionId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         OnModelCreatingPartial(modelBuilder);

@@ -45,6 +45,7 @@ public class TeacherDashboardController : ControllerBase
             .Include(oc => oc.Course)
             .Include(oc => oc.Section)
                 .ThenInclude(s => s.Session)
+                    .ThenInclude(sess => sess.Program)
             .Include(oc => oc.TeacherUser)
             .Where(oc => oc.TeacherUserId == teacherUserId)
             .OrderBy(oc => oc.Course.CourseTitle)
@@ -70,6 +71,10 @@ public class TeacherDashboardController : ControllerBase
                 OfferedCourseId = oc.OfferedCourseId,
                 CourseId = oc.CourseId,
                 ProgramCourseId = programCourseId,
+                ProgramId = programId,
+                ProgramName = oc.Section.Session.Program?.ProgramName ?? string.Empty,
+                ProgramCode = oc.Section.Session.Program?.ProgramCode ?? string.Empty,
+                SessionTitle = oc.Section.Session.SessionTitle ?? string.Empty,
                 CourseTitle = oc.Course.CourseTitle,
                 CourseCode = oc.Course.CourseCode,
                 SectionName = oc.Section.SectionName,

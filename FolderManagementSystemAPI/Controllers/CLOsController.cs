@@ -5,6 +5,7 @@ using FolderManagementSystemAPI.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using WebApplication1.Models.TeacherScaffold;
+using System;
 
 namespace FolderManagementSystemAPI.Controllers;
 
@@ -14,19 +15,30 @@ public class CLOsController : ControllerBase
 {
     private readonly FolderManagementDbContext _context;
     private readonly TeacherPermissionService _permissionService;
+    private readonly SessionScopeService _sessionScopeService;
+    private readonly ContentSubmissionService _contentSubmissionService;
+    private readonly NotificationService _notificationService;
 
     public CLOsController(
         FolderManagementDbContext context,
-        TeacherPermissionService permissionService)
+        TeacherPermissionService permissionService,
+        SessionScopeService sessionScopeService,
+        ContentSubmissionService contentSubmissionService,
+        NotificationService notificationService)
     {
         _context = context;
         _permissionService = permissionService;
+        _sessionScopeService = sessionScopeService;
+        _contentSubmissionService = contentSubmissionService;
+        _notificationService = notificationService;
     }
 
     [HttpGet("program-course/{programCourseId:int}")]
     public async Task<ActionResult<IEnumerable<CloDto>>> GetProgramCourseClos(
         int programCourseId,
-        [FromQuery] int? teacherUserId = null)
+        [FromQuery] int? teacherUserId = null,
+        [FromQuery] int? sessionId = null,
+        [FromQuery] int? offeredCourseId = null)
     {
         var programCourse = await _context.AcademicProgramCourses
             .FirstOrDefaultAsync(pc => pc.ProgramCourseId == programCourseId);
@@ -36,28 +48,40 @@ public class CLOsController : ControllerBase
             return NotFound(new { message = "Program course not found." });
         }
 
-        if (teacherUserId.HasValue)
+        if (teacherUserId is null or <= 0)
         {
-            var canView = await _permissionService.HasPermissionAsync(
-                teacherUserId.Value,
-                programCourseId,
-                TeacherPermissionTypes.ManageClos);
-
-            if (!canView)
-            {
-                return BadRequest(new { message = "You do not have permission to view CLOs." });
-            }
+            return BadRequest(new { message = "teacherUserId is required." });
         }
 
+        var resolvedSession = await _sessionScopeService.TryResolveSessionIdAsync(
+            programCourseId,
+            sessionId,
+            offeredCourseId);
+
+        if (!resolvedSession.Success)
+        {
+            return BadRequest(new { message = resolvedSession.Message });
+        }
+
+        var flags = await _permissionService.GetTeacherFlagsAsync(teacherUserId.Value, programCourseId);
+        var canViewAll = _contentSubmissionService.CanViewAllStatuses(
+            flags,
+            ContentSubmissionTypeCodes.Clos);
+        var visibleStatuses = _contentSubmissionService.VisibleContentStatuses(canViewAll);
+
         var clos = await _context.Clos
-            .Where(c => c.ProgramCourseId == programCourseId)
+            .Where(c =>
+                c.ProgramCourseId == programCourseId &&
+                c.SessionId == resolvedSession.SessionId &&
+                visibleStatuses.Contains(c.ContentStatus ?? ContentStatuses.Draft))
             .OrderBy(c => c.Clocode)
             .Select(c => new CloDto
             {
                 CloId = c.Cloid,
                 ProgramCourseId = c.ProgramCourseId,
                 CloCode = c.Clocode,
-                CloDescription = c.Clodescription
+                CloDescription = c.Clodescription,
+                ContentStatus = c.ContentStatus
             })
             .ToListAsync();
 
@@ -79,14 +103,51 @@ public class CLOsController : ControllerBase
             return BadRequest(new { message = "CLO description is required." });
         }
 
-        var nextNumber = await _context.Clos.CountAsync(c => c.ProgramCourseId == programCourseId) + 1;
-        var code = string.IsNullOrWhiteSpace(dto.CloCode)
-            ? $"CLO-{nextNumber}"
-            : dto.CloCode.Trim();
+        var resolvedSession = await _sessionScopeService.TryResolveSessionIdAsync(
+            programCourseId,
+            dto.SessionId,
+            dto.OfferedCourseId);
 
-        var duplicate = await _context.Clos.AnyAsync(c =>
-            c.ProgramCourseId == programCourseId &&
-            c.Clocode.ToLower() == code.ToLower());
+        if (!resolvedSession.Success)
+        {
+            return BadRequest(new { message = resolvedSession.Message });
+        }
+
+        var sessionId = resolvedSession.SessionId;
+
+        try
+        {
+            await _contentSubmissionService.EnsureContentTypeEditableAsync(
+                programCourseId,
+                sessionId,
+                ContentSubmissionTypeCodes.Clos);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+
+        var nextNumber = await _context.Clos
+            .Where(c => c.ProgramCourseId == programCourseId && c.SessionId == sessionId)
+            .Select(c => c.Clocode)
+            .ToListAsync();
+        var next = nextNumber.Select(CloCodeFormatter.TrailingNumber).DefaultIfEmpty(0).Max() + 1;
+
+        var code = string.IsNullOrWhiteSpace(dto.CloCode)
+            ? CloCodeFormatter.NextCode(next)
+            : CloCodeFormatter.Canonical(dto.CloCode);
+
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            return BadRequest(new { message = $"CLO code is required. Use {CloCodeFormatter.FormatHint}." });
+        }
+
+        var existingCodes = await _context.Clos
+            .Where(c => c.ProgramCourseId == programCourseId && c.SessionId == sessionId)
+            .Select(c => c.Clocode)
+            .ToListAsync();
+
+        var duplicate = existingCodes.Any(c => CloCodeFormatter.Equals(c, code));
 
         if (duplicate)
         {
@@ -96,8 +157,10 @@ public class CLOsController : ControllerBase
         var clo = new Clo
         {
             ProgramCourseId = programCourseId,
+            SessionId = sessionId,
             Clocode = code,
-            Clodescription = dto.CloDescription.Trim()
+            Clodescription = dto.CloDescription.Trim(),
+            ContentStatus = "Draft"
         };
 
         _context.Clos.Add(clo);
@@ -117,7 +180,9 @@ public class CLOsController : ControllerBase
     public async Task<ActionResult<CloImportResultDto>> ImportClos(
         int programCourseId,
         [FromForm] int teacherUserId,
-        [FromForm] IFormFile file)
+        [FromForm] IFormFile file,
+        [FromForm] int? sessionId = null,
+        [FromForm] int? offeredCourseId = null)
     {
         if (!await CanManageClosAsync(programCourseId, teacherUserId))
         {
@@ -132,6 +197,30 @@ public class CLOsController : ControllerBase
         if (Path.GetExtension(file.FileName).ToLower() != ".xlsx")
         {
             return BadRequest(new { message = "Only .xlsx files are supported." });
+        }
+
+        var resolvedSession = await _sessionScopeService.TryResolveSessionIdAsync(
+            programCourseId,
+            sessionId,
+            offeredCourseId);
+
+        if (!resolvedSession.Success)
+        {
+            return BadRequest(new { message = resolvedSession.Message });
+        }
+
+        var effectiveSessionId = resolvedSession.SessionId;
+
+        try
+        {
+            await _contentSubmissionService.EnsureContentTypeEditableAsync(
+                programCourseId,
+                effectiveSessionId,
+                ContentSubmissionTypeCodes.Clos);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
         }
 
         var inserted = 0;
@@ -163,11 +252,20 @@ public class CLOsController : ControllerBase
         }
 
         var existingCodes = await _context.Clos
-            .Where(c => c.ProgramCourseId == programCourseId)
-            .Select(c => c.Clocode.ToLower())
+            .Where(c =>
+                c.ProgramCourseId == programCourseId &&
+                c.SessionId == effectiveSessionId)
+            .Select(c => c.Clocode)
             .ToListAsync();
 
-        var existingSet = existingCodes.ToHashSet();
+        var existingSet = existingCodes
+            .Select(CloCodeFormatter.Canonical)
+            .Where(c => c.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var nextAutoNumber = existingCodes
+            .Select(CloCodeFormatter.TrailingNumber)
+            .DefaultIfEmpty(0)
+            .Max() + 1;
 
         for (var i = 1; i < rows.Count; i++)
         {
@@ -180,17 +278,16 @@ public class CLOsController : ControllerBase
             }
 
             var code = codeCol > 0
-                ? row.Cell(codeCol).GetString().Trim()
+                ? CloCodeFormatter.Canonical(row.Cell(codeCol).GetString())
                 : string.Empty;
 
             if (string.IsNullOrWhiteSpace(code))
             {
-                code = $"CLO-{existingSet.Count + inserted + 1}";
+                code = CloCodeFormatter.NextCode(nextAutoNumber);
+                nextAutoNumber++;
             }
 
-            var codeKey = code.ToLower();
-
-            if (existingSet.Contains(codeKey))
+            if (existingSet.Contains(code))
             {
                 skipped++;
                 continue;
@@ -199,11 +296,13 @@ public class CLOsController : ControllerBase
             _context.Clos.Add(new Clo
             {
                 ProgramCourseId = programCourseId,
+                SessionId = effectiveSessionId,
                 Clocode = code,
-                Clodescription = description
+                Clodescription = description,
+                ContentStatus = "Draft"
             });
 
-            existingSet.Add(codeKey);
+            existingSet.Add(code);
             inserted++;
         }
 
@@ -213,7 +312,9 @@ public class CLOsController : ControllerBase
         }
 
         var clos = await _context.Clos
-            .Where(c => c.ProgramCourseId == programCourseId)
+            .Where(c =>
+                c.ProgramCourseId == programCourseId &&
+                c.SessionId == effectiveSessionId)
             .OrderBy(c => c.Clocode)
             .Select(c => new CloDto
             {
@@ -231,6 +332,182 @@ public class CLOsController : ControllerBase
             Skipped = skipped,
             Clos = clos
         });
+    }
+
+    [HttpPut("{cloId:int}")]
+    public async Task<ActionResult<CloDto>> UpdateClo(
+        int cloId,
+        UpdateCloDto dto,
+        [FromQuery] int? offeredCourseId = null,
+        [FromQuery] int? teacherUserId = null)
+    {
+        var effectiveTeacherId = teacherUserId is > 0 ? teacherUserId.Value : dto.TeacherUserId;
+        var effectiveOfferedCourseId = offeredCourseId ?? dto.OfferedCourseId;
+
+        var clo = await _context.Clos.FirstOrDefaultAsync(c => c.Cloid == cloId);
+        if (clo == null)
+        {
+            return NotFound(new { message = "CLO not found." });
+        }
+
+        if (!await CanManageClosAsync(clo.ProgramCourseId, effectiveTeacherId))
+        {
+            return BadRequest(new { message = "You do not have permission to manage CLOs." });
+        }
+
+        var status = clo.ContentStatus ?? ContentStatuses.Draft;
+        if (status is not (ContentStatuses.Draft or ContentStatuses.Rejected))
+        {
+            return BadRequest(new { message = "Only Draft or Rejected CLOs can be edited." });
+        }
+
+        try
+        {
+            await _contentSubmissionService.EnsureContentTypeEditableAsync(
+                clo.ProgramCourseId,
+                clo.SessionId,
+                ContentSubmissionTypeCodes.Clos);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+
+        if (string.IsNullOrWhiteSpace(dto.CloDescription))
+        {
+            return BadRequest(new { message = "CLO description is required." });
+        }
+
+        if (!string.IsNullOrWhiteSpace(dto.CloCode))
+        {
+            var code = CloCodeFormatter.Canonical(dto.CloCode);
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                return BadRequest(new { message = $"CLO code is required. Use {CloCodeFormatter.FormatHint}." });
+            }
+
+            var duplicate = await _context.Clos
+                .Where(c =>
+                    c.ProgramCourseId == clo.ProgramCourseId &&
+                    c.SessionId == clo.SessionId &&
+                    c.Cloid != cloId)
+                .Select(c => c.Clocode)
+                .ToListAsync();
+
+            if (duplicate.Any(c => CloCodeFormatter.Equals(c, code)))
+            {
+                return BadRequest(new { message = $"CLO code '{code}' already exists." });
+            }
+
+            clo.Clocode = code;
+        }
+
+        clo.Clodescription = dto.CloDescription.Trim();
+        if (string.Equals(status, ContentStatuses.Rejected, StringComparison.OrdinalIgnoreCase))
+        {
+            clo.ContentStatus = ContentStatuses.Draft;
+        }
+
+        await _context.SaveChangesAsync();
+        _ = effectiveOfferedCourseId;
+
+        return Ok(new CloDto
+        {
+            CloId = clo.Cloid,
+            ProgramCourseId = clo.ProgramCourseId,
+            CloCode = clo.Clocode,
+            CloDescription = clo.Clodescription,
+            ContentStatus = clo.ContentStatus ?? ContentStatuses.Draft
+        });
+    }
+
+    [HttpDelete("{cloId:int}")]
+    public async Task<IActionResult> DeleteClo(
+        int cloId,
+        [FromQuery] int? offeredCourseId = null,
+        [FromQuery] int? teacherUserId = null)
+    {
+        if (teacherUserId is null or <= 0)
+        {
+            return BadRequest(new { message = "teacherUserId is required." });
+        }
+
+        var clo = await _context.Clos.FirstOrDefaultAsync(c => c.Cloid == cloId);
+        if (clo == null)
+        {
+            return NotFound(new { message = "CLO not found." });
+        }
+
+        if (!await CanManageClosAsync(clo.ProgramCourseId, teacherUserId.Value))
+        {
+            return BadRequest(new { message = "You do not have permission to manage CLOs." });
+        }
+
+        var status = clo.ContentStatus ?? ContentStatuses.Draft;
+        if (status is not (ContentStatuses.Draft or ContentStatuses.Rejected))
+        {
+            return BadRequest(new { message = "Only Draft or Rejected CLOs can be deleted." });
+        }
+
+        try
+        {
+            await _contentSubmissionService.EnsureContentTypeEditableAsync(
+                clo.ProgramCourseId,
+                clo.SessionId,
+                ContentSubmissionTypeCodes.Clos);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+
+        _context.Clos.Remove(clo);
+        await _context.SaveChangesAsync();
+        _ = offeredCourseId;
+
+        return Ok(new { message = "CLO deleted." });
+    }
+
+    [HttpPost("submit-by-program-course/{programCourseId:int}")]
+    public async Task<ActionResult<SubmitContentResultDto>> SubmitByProgramCourse(
+        int programCourseId,
+        [FromQuery] int? offeredCourseId = null,
+        [FromQuery] int? submittedByUserId = null)
+    {
+        if (submittedByUserId is null or <= 0)
+        {
+            return BadRequest(new { message = "submittedByUserId is required." });
+        }
+
+        try
+        {
+            var result = await _contentSubmissionService.SubmitForReviewAsync(
+                programCourseId,
+                new SubmitContentForReviewDto
+                {
+                    TeacherUserId = submittedByUserId.Value,
+                    ContentTypeCode = ContentSubmissionTypeCodes.Clos,
+                    OfferedCourseId = offeredCourseId
+                });
+
+            var courseTitle = await (
+                from pc in _context.AcademicProgramCourses.AsNoTracking()
+                join course in _context.Courses.AsNoTracking() on pc.CourseId equals course.CourseId
+                where pc.ProgramCourseId == programCourseId
+                select course.CourseTitle).FirstOrDefaultAsync() ?? "course";
+
+            await _notificationService.NotifyHodUsersAsync(
+                "CLOs submitted for review",
+                $"CLOs for {courseTitle} were submitted and await HOD approval.",
+                ContentSubmissionTypeCodes.Clos,
+                result.SubmissionId);
+
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     private async Task<bool> CanManageClosAsync(int programCourseId, int teacherUserId)
@@ -255,7 +532,7 @@ public class CLOsController : ControllerBase
 
         foreach (var cell in headerRow.CellsUsed())
         {
-            var key = cell.GetString().Trim().ToLowerInvariant();
+            var key = NormalizeHeader(cell.GetString());
 
             if (!string.IsNullOrWhiteSpace(key) && !map.ContainsKey(key))
             {
@@ -270,12 +547,22 @@ public class CLOsController : ControllerBase
     {
         foreach (var candidate in candidates)
         {
-            if (headerMap.TryGetValue(candidate, out var index))
+            var normalizedCandidate = NormalizeHeader(candidate);
+            if (headerMap.TryGetValue(normalizedCandidate, out var index))
             {
                 return index;
             }
         }
 
         return 0;
+    }
+
+    // Normalizes Excel header text so variations like "CLO Code", "CLO_Code", "CLO-Code" match.
+    private static string NormalizeHeader(string value)
+    {
+        return value.Trim().ToLowerInvariant()
+            .Replace(" ", "")
+            .Replace("_", "")
+            .Replace("-", "");
     }
 }

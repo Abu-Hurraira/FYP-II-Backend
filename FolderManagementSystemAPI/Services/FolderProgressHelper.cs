@@ -164,7 +164,7 @@ public static class FolderProgressHelper
         RequireAtLeastOne("l", "Outcomes Assessment", "Outcomes Assessment");
         RequireAtLeastOne("m", "Technology Involved", "Technology Involved");
         RequireAtLeastOne("n", "Design Techniques Practiced", "Design Techniques Practiced");
-        RequireAtLeastOne("o", "Complete Analysis of Course", "Complete Analysis of Course");
+        RequireAtLeastOne("o", "FCAR Report", "Complete Analysis of Course");
 
         return missing;
     }
@@ -195,7 +195,7 @@ public static class FolderProgressHelper
             "l" => "Outcomes Assessment",
             "m" => "Technology Involved",
             "n" => "Design Techniques Practiced",
-            "o" => "Complete Analysis of Course",
+            "o" => "Complete Analysis of Course", // stored category; folder displays as FCAR Report
             _ => null
         };
     }

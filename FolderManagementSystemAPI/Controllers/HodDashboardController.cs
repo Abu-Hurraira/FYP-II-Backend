@@ -4,6 +4,7 @@ using FolderManagementSystemAPI.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 namespace FolderManagementSystemAPI.Controllers;
 
@@ -26,6 +27,150 @@ public class HodDashboardController : ControllerBase
         _dashboardService = dashboardService;
         _connectionString = _context.Database.GetConnectionString()
             ?? throw new InvalidOperationException("Database connection string not found.");
+    }
+
+    [HttpGet("courses")]
+    public async Task<ActionResult<HodDashboardCoursesPageDto>> GetCoursesPage(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 12,
+        [FromQuery] string? search = null,
+        [FromQuery] bool lite = false,
+        [FromQuery] int? hodUserId = null)
+    {
+        var effectiveHodUserId = hodUserId;
+        if (effectiveHodUserId is null or <= 0)
+        {
+            var claim =
+                User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue("sub");
+            if (int.TryParse(claim, out var fromClaim) && fromClaim > 0)
+            {
+                effectiveHodUserId = fromClaim;
+            }
+        }
+
+        if (effectiveHodUserId is > 0 && !await IsValidHodAsync(effectiveHodUserId.Value))
+        {
+            return NotFound(new { message = "HOD user not found." });
+        }
+
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 48);
+        var q = (search ?? string.Empty).Trim().ToLowerInvariant();
+
+        var query = _context.OfferedCourses.AsNoTracking().Select(oc => new
+        {
+            oc.OfferedCourseId,
+            oc.SectionId,
+            oc.CourseId,
+            oc.TeacherUserId,
+            TeacherName = oc.TeacherUser.FullName,
+            CourseTitle = oc.Course.CourseTitle,
+            CourseCode = oc.Course.CourseCode ?? string.Empty,
+            SectionName = oc.Section.SectionName,
+            ProgramId = oc.Section.Session.ProgramId,
+            ProgramName = oc.Section.Session.Program.ProgramName ?? string.Empty,
+            ProgramCode = oc.Section.Session.Program.ProgramCode ?? string.Empty
+        });
+
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            query = query.Where(oc =>
+                oc.TeacherName.ToLower().Contains(q) ||
+                oc.SectionName.ToLower().Contains(q) ||
+                oc.CourseTitle.ToLower().Contains(q) ||
+                oc.CourseCode.ToLower().Contains(q) ||
+                oc.ProgramName.ToLower().Contains(q) ||
+                oc.ProgramCode.ToLower().Contains(q));
+        }
+
+        var totalCount = await query.CountAsync();
+        var offerings = await query
+            .OrderBy(oc => oc.CourseTitle)
+            .ThenBy(oc => oc.SectionName)
+            .ThenBy(oc => oc.TeacherName)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
+
+        var ids = offerings.Select(o => o.OfferedCourseId).ToList();
+        var folderMap = new Dictionary<int, string>();
+        if (ids.Count > 0)
+        {
+            var folderRows = await _context.CourseFolders.AsNoTracking()
+                .Where(f => ids.Contains(f.OfferedCourseId))
+                .Select(f => new { f.OfferedCourseId, f.FolderStatus })
+                .ToListAsync();
+            foreach (var row in folderRows)
+            {
+                folderMap[row.OfferedCourseId] = row.FolderStatus ?? "Open";
+            }
+        }
+
+        var progressMap = new Dictionary<int, (int Total, int Covered)>();
+        if (!lite && ids.Count > 0)
+        {
+            var progressRows = await _context.OfferedCourseTopicProgresses.AsNoTracking()
+                .Where(p => ids.Contains(p.OfferedCourseId))
+                .GroupBy(p => p.OfferedCourseId)
+                .Select(g => new
+                {
+                    OfferedCourseId = g.Key,
+                    Total = g.Count(),
+                    Covered = g.Count(x => x.IsCompleted)
+                })
+                .ToListAsync();
+            foreach (var row in progressRows)
+            {
+                progressMap[row.OfferedCourseId] = (row.Total, row.Covered);
+            }
+        }
+
+        var items = offerings.Select(oc =>
+        {
+            folderMap.TryGetValue(oc.OfferedCourseId, out var rawStatus);
+            var folderStatus = NormalizeFolderStatus(rawStatus);
+            var locked = folderStatus is "Submitted" or "Approved";
+            progressMap.TryGetValue(oc.OfferedCourseId, out var progress);
+            var total = progress.Total;
+            var covered = progress.Covered;
+
+            return new HodCourseCardDto
+            {
+                OfferedCourseId = oc.OfferedCourseId,
+                SectionId = oc.SectionId,
+                CourseId = oc.CourseId,
+                ProgramId = oc.ProgramId,
+                TeacherUserId = oc.TeacherUserId,
+                TeacherName = oc.TeacherName,
+                CourseTitle = oc.CourseTitle,
+                CourseCode = oc.CourseCode,
+                SectionName = oc.SectionName,
+                ProgramName = oc.ProgramName,
+                ProgramCode = oc.ProgramCode,
+                StatusLabel = folderStatus,
+                FolderStatus = folderStatus,
+                IsSectionA = IsSectionAName(oc.SectionName),
+                WeeklyProgressPercentage = total == 0 ? 0 : Math.Round(covered * 100m / total, 1),
+                CoveredTopics = covered,
+                TotalTopics = total,
+                DeviationTopics = Math.Max(total - covered, 0),
+                HasWeeklyContent = total > 0,
+                IsLocked = locked,
+                IsFolderLocked = locked,
+                FolderSubmitted = folderStatus == "Submitted",
+                IsSubmitted = folderStatus == "Submitted"
+            };
+        }).ToList();
+
+        return Ok(new HodDashboardCoursesPageDto
+        {
+            Items = items,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount,
+            HasMore = page * pageSize < totalCount
+        });
     }
 
     [HttpGet("{hodUserId:int}/courses")]
@@ -71,8 +216,28 @@ public class HodDashboardController : ControllerBase
             return NotFound(new { message = "HOD user not found." });
         }
 
-        var dashboard = await _dashboardService.BuildAsync();
+        // Summary only — permissions/sections load per course on expand.
+        var dashboard = await _dashboardService.BuildSummaryAsync();
         return Ok(dashboard);
+    }
+
+    [HttpGet("{hodUserId:int}/courses-dashboard/{courseId:int}")]
+    public async Task<ActionResult<HodCourseDashboardBlockDto>> GetCourseDashboardDetail(
+        int hodUserId,
+        int courseId)
+    {
+        if (!await IsValidHodAsync(hodUserId))
+        {
+            return NotFound(new { message = "HOD user not found." });
+        }
+
+        var detail = await _dashboardService.BuildCourseDetailAsync(courseId);
+        if (detail == null)
+        {
+            return NotFound(new { message = "Course not found in the current offered-courses dashboard." });
+        }
+
+        return Ok(detail);
     }
 
     [HttpGet("{hodUserId:int}/courses/{courseId:int}/offerings")]
@@ -128,48 +293,58 @@ public class HodDashboardController : ControllerBase
             return NotFound(new { message = "HOD user not found." });
         }
 
-        var submittedOfferings = await _context.OfferedCourses
-            .Include(oc => oc.Course)
-            .Include(oc => oc.Section)
-                .ThenInclude(s => s.Session)
-                    .ThenInclude(sess => sess.Program)
-            .Include(oc => oc.TeacherUser)
-            .Where(oc => _context.CourseFolders.Any(cf =>
-                cf.OfferedCourseId == oc.OfferedCourseId &&
-                cf.FolderStatus == "Submitted"))
-            .OrderByDescending(oc => oc.Course.CourseTitle)
-            .ThenBy(oc => oc.Section.SectionName)
-            .ToListAsync();
-
-        var result = new List<HodSubmittedReviewDto>();
-
-        foreach (var oc in submittedOfferings)
-        {
-            var folder = await GetCourseFolderInfoAsync(oc.OfferedCourseId);
-            var submittedAt = folder != null
-                ? await GetLatestSubmissionDateAsync(folder.CourseFolderId)
-                : null;
-            var progressPercent = folder != null
-                ? await GetFolderProgressPercentAsync(folder.CourseFolderId)
-                : 0;
-
-            result.Add(new HodSubmittedReviewDto
+        var submitted = await (
+            from oc in _context.OfferedCourses.AsNoTracking()
+            join cf in _context.CourseFolders.AsNoTracking() on oc.OfferedCourseId equals cf.OfferedCourseId
+            where cf.FolderStatus == "Submitted" || cf.FolderStatus == "Approved"
+            select new
             {
-                OfferedCourseId = oc.OfferedCourseId,
-                CourseId = oc.CourseId,
-                TeacherUserId = oc.TeacherUserId,
+                oc.OfferedCourseId,
+                oc.CourseId,
+                oc.TeacherUserId,
                 TeacherName = oc.TeacherUser.FullName,
                 CourseTitle = oc.Course.CourseTitle,
-                CourseCode = oc.Course.CourseCode,
+                CourseCode = oc.Course.CourseCode ?? string.Empty,
                 SectionName = oc.Section.SectionName,
-                ProgramName = oc.Section.Session.Program.ProgramName,
-                SubmittedAt = submittedAt,
-                OverallProgressPercent = progressPercent
-            });
-        }
+                ProgramId = oc.Section.Session.ProgramId,
+                ProgramName = oc.Section.Session.Program.ProgramName ?? string.Empty,
+                CourseFolderId = cf.CourseFolderId,
+                FolderStatus = cf.FolderStatus ?? "Submitted"
+            }).ToListAsync();
 
-        result = result
-            .OrderByDescending(x => x.SubmittedAt ?? DateTime.MinValue)
+        var folderIds = submitted.Select(x => x.CourseFolderId).Distinct().ToList();
+        var submittedAtMap = folderIds.Count == 0
+            ? new Dictionary<int, DateTime?>()
+            : await _context.FolderSubmissions.AsNoTracking()
+                .Where(s => folderIds.Contains(s.CourseFolderId))
+                .GroupBy(s => s.CourseFolderId)
+                .Select(g => new { CourseFolderId = g.Key, SubmittedAt = g.Max(x => x.SubmittedAt) })
+                .ToDictionaryAsync(x => x.CourseFolderId, x => (DateTime?)x.SubmittedAt);
+
+        var result = submitted
+            .Select(oc =>
+            {
+                submittedAtMap.TryGetValue(oc.CourseFolderId, out var submittedAt);
+                var folderStatus = NormalizeFolderStatus(oc.FolderStatus);
+                return new HodSubmittedReviewDto
+                {
+                    OfferedCourseId = oc.OfferedCourseId,
+                    CourseId = oc.CourseId,
+                    TeacherUserId = oc.TeacherUserId,
+                    TeacherName = oc.TeacherName,
+                    CourseTitle = oc.CourseTitle,
+                    CourseCode = oc.CourseCode,
+                    SectionName = oc.SectionName,
+                    ProgramId = oc.ProgramId,
+                    ProgramName = oc.ProgramName,
+                    SubmittedAt = submittedAt,
+                    OverallProgressPercent = 0,
+                    FolderStatus = folderStatus,
+                    ReviewStatus = folderStatus == "Approved" ? "Approved" : "Pending"
+                };
+            })
+            .OrderBy(x => x.FolderStatus == "Approved" ? 1 : 0)
+            .ThenByDescending(x => x.SubmittedAt ?? DateTime.MinValue)
             .ThenBy(x => x.CourseTitle)
             .ToList();
 
@@ -179,19 +354,35 @@ public class HodDashboardController : ControllerBase
     private async Task<bool> IsValidHodAsync(int hodUserId)
     {
         return await _context.Users
-            .Include(u => u.Role)
+            .AsNoTracking()
             .AnyAsync(u => u.UserId == hodUserId && u.Role.RoleName == "HOD");
+    }
+
+    private static string NormalizeFolderStatus(string? status)
+    {
+        return status switch
+        {
+            "Submitted" => "Submitted",
+            "Approved" => "Approved",
+            "Rejected" => "Rejected",
+            _ => "Open"
+        };
     }
 
     private async Task<HodCourseCardDto> BuildCourseCardAsync(OfferedCourse oc)
     {
         var programId = oc.Section.Session.ProgramId;
+        var sessionId = oc.Section.SessionId;
         var programCourseId = await EnsureProgramCourseAsync(programId, oc.CourseId);
 
-        var comparableIds = await GetComparableOfferedCourseIdsAsync(programId, oc.CourseId);
-        await EnsureProgressRowsForAllAsync(programCourseId, comparableIds);
+        var comparableIds = await GetComparableOfferedCourseIdsAsync(
+            programId,
+            oc.CourseId,
+            sessionId,
+            oc.OfferedCourseId);
+        await EnsureProgressRowsForAllAsync(programCourseId, sessionId, comparableIds);
 
-        var leafTopicIds = await GetLeafTopicIdsAsync(programCourseId);
+        var leafTopicIds = await GetLeafTopicIdsAsync(programCourseId, sessionId);
         var progressMap = await GetProgressMapAsync(comparableIds);
         var metrics = CourseSyncCalculator.Compute(
             oc.OfferedCourseId,
@@ -207,27 +398,40 @@ public class HodDashboardController : ControllerBase
         return new HodCourseCardDto
         {
             OfferedCourseId = oc.OfferedCourseId,
+            SectionId = oc.SectionId,
             CourseId = oc.CourseId,
             ProgramId = programId,
+            ProgramCourseId = programCourseId,
             TeacherUserId = oc.TeacherUserId,
             TeacherName = oc.TeacherUser.FullName,
             CourseTitle = oc.Course.CourseTitle,
             CourseCode = oc.Course.CourseCode,
             SectionName = oc.Section.SectionName,
             ProgramName = oc.Section.Session.Program.ProgramName,
+            ProgramCode = oc.Section.Session.Program.ProgramCode ?? string.Empty,
             StatusLabel = folderStatus,
+            FolderStatus = folderStatus,
             IsSectionA = IsSectionAName(oc.Section.SectionName),
             CanManageClos = permissionFlags.CanManageClos,
-            CanUploadCourseContent = permissionFlags.CanUploadCourseContent,
-            CanUploadExamQuestions = permissionFlags.CanUploadExamQuestions,
+            CanUploadWeeklyContent = permissionFlags.CanUploadWeeklyContent,
+            CanUploadMidExamQuestions = permissionFlags.CanUploadMidExamQuestions,
+            CanUploadFinalExamQuestions = permissionFlags.CanUploadFinalExamQuestions,
+            CanManageCloPloMapping = permissionFlags.CanManageCloPloMapping,
+            CanManageCloTaskMapping = permissionFlags.CanManageCloTaskMapping,
             HasWeeklyContent = metrics.HasWeeklyContent,
             TotalTopics = metrics.TotalTopics,
             CoveredTopics = metrics.CoveredTopics,
+            DeviationTopics = metrics.GapTopics,
+            WeeklyProgressPercentage = metrics.ProgressPercentage,
             SyncScore = metrics.SyncScore,
             ProgressPercentage = metrics.ProgressPercentage,
             GapTopics = metrics.GapTopics,
             DeviationLabel = metrics.DeviationLabel,
-            ShowActionButtons = metrics.ShowActionButtons
+            ShowActionButtons = metrics.ShowActionButtons,
+            IsLocked = folderStatus is "Submitted" or "Approved",
+            IsFolderLocked = folderStatus is "Submitted" or "Approved",
+            FolderSubmitted = folderStatus == "Submitted",
+            IsSubmitted = folderStatus == "Submitted"
         };
     }
 
@@ -264,7 +468,11 @@ public class HodDashboardController : ControllerBase
         return Convert.ToInt32(await insertCommand.ExecuteScalarAsync());
     }
 
-    private async Task<List<int>> GetComparableOfferedCourseIdsAsync(int programId, int courseId)
+    private async Task<List<int>> GetComparableOfferedCourseIdsAsync(
+        int programId,
+        int courseId,
+        int sessionId,
+        int currentOfferedCourseId)
     {
         var ids = new List<int>();
 
@@ -278,16 +486,12 @@ public class HodDashboardController : ControllerBase
             INNER JOIN AcademicSessions sess ON sess.SessionID = s.SessionID
             WHERE oc.CourseID = @CourseID
             AND sess.ProgramID = @ProgramID
-            AND NOT EXISTS (
-                SELECT 1
-                FROM CourseFolders cf
-                WHERE cf.OfferedCourseID = oc.OfferedCourseID
-                AND cf.FolderStatus = 'Submitted'
-            );
+            AND s.SessionID = @SessionID;
         ", connection);
 
         command.Parameters.AddWithValue("@CourseID", courseId);
         command.Parameters.AddWithValue("@ProgramID", programId);
+        command.Parameters.AddWithValue("@SessionID", sessionId);
 
         await using var reader = await command.ExecuteReaderAsync();
 
@@ -299,7 +503,10 @@ public class HodDashboardController : ControllerBase
         return ids;
     }
 
-    private async Task EnsureProgressRowsForAllAsync(int programCourseId, List<int> offeredCourseIds)
+    private async Task EnsureProgressRowsForAllAsync(
+        int programCourseId,
+        int sessionId,
+        List<int> offeredCourseIds)
     {
         if (offeredCourseIds.Count == 0)
         {
@@ -316,6 +523,7 @@ public class HodDashboardController : ControllerBase
                 SELECT @OfferedCourseID, t.TopicID, 0
                 FROM CourseTopics t
                 WHERE t.ProgramCourseID = @ProgramCourseID
+                AND t.SessionID = @SessionID
                 AND NOT EXISTS (
                     SELECT 1 FROM OfferedCourseTopicProgress p
                     WHERE p.OfferedCourseID = @OfferedCourseID AND p.TopicID = t.TopicID
@@ -324,93 +532,15 @@ public class HodDashboardController : ControllerBase
 
             command.Parameters.AddWithValue("@OfferedCourseID", offeredCourseId);
             command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+            command.Parameters.AddWithValue("@SessionID", sessionId);
 
             await command.ExecuteNonQueryAsync();
         }
     }
 
-    private async Task<int> GetLeafTopicCountAsync(int programCourseId)
+    private async Task<List<int>> GetLeafTopicIdsAsync(int programCourseId, int sessionId)
     {
-        await using var connection = new SqlConnection(_connectionString);
-        await connection.OpenAsync();
-
-        var command = new SqlCommand(@"
-            SELECT COUNT(1)
-            FROM CourseTopics t
-            WHERE t.ProgramCourseID = @ProgramCourseID
-            AND NOT EXISTS (
-                SELECT 1 FROM CourseTopics child WHERE child.ParentTopicID = t.TopicID
-            );
-        ", connection);
-
-        command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
-
-        return Convert.ToInt32(await command.ExecuteScalarAsync());
-    }
-
-    private async Task<int> GetCompletedLeafTopicCountAsync(int offeredCourseId, int programCourseId)
-    {
-        await using var connection = new SqlConnection(_connectionString);
-        await connection.OpenAsync();
-
-        var command = new SqlCommand(@"
-            SELECT COUNT(1)
-            FROM CourseTopics t
-            INNER JOIN OfferedCourseTopicProgress p
-                ON p.TopicID = t.TopicID AND p.OfferedCourseID = @OfferedCourseID
-            WHERE t.ProgramCourseID = @ProgramCourseID
-            AND p.IsCompleted = 1
-            AND NOT EXISTS (
-                SELECT 1 FROM CourseTopics child WHERE child.ParentTopicID = t.TopicID
-            );
-        ", connection);
-
-        command.Parameters.AddWithValue("@OfferedCourseID", offeredCourseId);
-        command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
-
-        return Convert.ToInt32(await command.ExecuteScalarAsync());
-    }
-
-    private async Task<int> GetGapTopicCountAsync(
-        int offeredCourseId,
-        int programCourseId,
-        List<int> comparableOfferedCourseIds)
-    {
-        if (comparableOfferedCourseIds.Count <= 1)
-        {
-            return 0;
-        }
-
-        var leafTopics = await GetLeafTopicIdsAsync(programCourseId);
-        var progressMap = await GetProgressMapAsync(comparableOfferedCourseIds);
-        var gapCount = 0;
-
-        foreach (var topicId in leafTopics)
-        {
-            var currentKey = $"{offeredCourseId}|{topicId}";
-            var currentCompleted = progressMap.TryGetValue(currentKey, out var value) && value;
-
-            if (currentCompleted)
-            {
-                continue;
-            }
-
-            var coveredByOther = comparableOfferedCourseIds
-                .Where(id => id != offeredCourseId)
-                .Any(id => progressMap.TryGetValue($"{id}|{topicId}", out var other) && other);
-
-            if (coveredByOther)
-            {
-                gapCount++;
-            }
-        }
-
-        return gapCount;
-    }
-
-    private async Task<List<int>> GetLeafTopicIdsAsync(int programCourseId)
-    {
-        var topicIds = new List<int>();
+        var ids = new List<int>();
 
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
@@ -419,21 +549,26 @@ public class HodDashboardController : ControllerBase
             SELECT t.TopicID
             FROM CourseTopics t
             WHERE t.ProgramCourseID = @ProgramCourseID
+            AND t.SessionID = @SessionID
             AND NOT EXISTS (
-                SELECT 1 FROM CourseTopics child WHERE child.ParentTopicID = t.TopicID
+                SELECT 1
+                FROM CourseTopics child
+                WHERE child.ParentTopicID = t.TopicID
+                AND child.SessionID = t.SessionID
             );
         ", connection);
 
         command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+        command.Parameters.AddWithValue("@SessionID", sessionId);
 
         await using var reader = await command.ExecuteReaderAsync();
 
         while (await reader.ReadAsync())
         {
-            topicIds.Add(Convert.ToInt32(reader["TopicID"]));
+            ids.Add(Convert.ToInt32(reader["TopicID"]));
         }
 
-        return topicIds;
+        return ids;
     }
 
     private async Task<Dictionary<string, bool>> GetProgressMapAsync(List<int> offeredCourseIds)
@@ -491,7 +626,10 @@ public class HodDashboardController : ControllerBase
         }
 
         var status = Convert.ToString(result) ?? "Open";
-        return status == "Submitted" ? "Submitted" : "Open";
+        return status == "Submitted" ? "Submitted"
+            : status == "Approved" ? "Approved"
+            : status == "Rejected" ? "Rejected"
+            : "Open";
     }
 
     private async Task<CourseFolderInfo?> GetCourseFolderInfoAsync(int offeredCourseId)
@@ -533,7 +671,6 @@ public class HodDashboardController : ControllerBase
             SELECT TOP 1 SubmittedAt
             FROM FolderSubmissions
             WHERE CourseFolderID = @CourseFolderID
-            AND SubmissionStatus = 'Submitted'
             ORDER BY SubmittedAt DESC;
         ", connection);
 
@@ -578,29 +715,8 @@ public class HodDashboardController : ControllerBase
         return total == 0 ? 0 : (int)Math.Round(withFiles * 100m / total);
     }
 
-    private static bool IsSectionAName(string? sectionName)
-    {
-        if (string.IsNullOrWhiteSpace(sectionName))
-        {
-            return false;
-        }
-
-        var name = sectionName.Trim();
-
-        if (name.EndsWith("-A", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        if (name.Length >= 2 &&
-            char.ToUpperInvariant(name[^1]) == 'A' &&
-            char.IsDigit(name[^2]))
-        {
-            return true;
-        }
-
-        return string.Equals(name, "A", StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool IsSectionAName(string? sectionName) =>
+        SectionNameFormatter.IsSectionA(sectionName);
 
     private sealed class CourseFolderInfo
     {

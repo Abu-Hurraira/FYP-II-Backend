@@ -43,7 +43,9 @@ public class TeacherSynchronizationController : ControllerBase
 
         var teachers = await GetComparableOfferedCoursesAsync(
             current.ProgramId,
-            current.CourseId
+            current.CourseId,
+            current.SessionId,
+            offeredCourseId
         );
 
         if (teachers.Count == 0)
@@ -62,13 +64,13 @@ public class TeacherSynchronizationController : ControllerBase
             .Select(x => x.OfferedCourseId)
             .ToList();
 
-        await EnsureProgressRowsForAllAsync(programCourseId, offeredCourseIds);
+        await EnsureProgressRowsForAllAsync(programCourseId, current.SessionId, offeredCourseIds);
 
-        var topics = await GetLeafTopicsAsync(programCourseId);
+        var (topics, parentByTopicId) = await GetLeafTopicsAsync(programCourseId, current.SessionId);
         var progressMap = await GetProgressMapAsync(offeredCourseIds);
 
-        var matrix = BuildMatrix(topics, teachers, progressMap);
-        var commonTopics = BuildCommonTopics(matrix);
+        var matrix = BuildMatrix(topics, teachers, progressMap, parentByTopicId);
+        var commonTopics = BuildCommonTopics(matrix, offeredCourseId);
         var gapTopics = BuildGapTopics(matrix, teachers, offeredCourseId);
 
         var result = new TeacherSynchronizationDto
@@ -102,6 +104,7 @@ public class TeacherSynchronizationController : ControllerBase
                 c.CourseCode,
                 s.SectionID,
                 s.SectionName,
+                s.SessionID,
                 sess.ProgramID,
                 u.FullName AS TeacherName
             FROM OfferedCourses oc
@@ -134,6 +137,7 @@ public class TeacherSynchronizationController : ControllerBase
             CourseCode = Convert.ToString(reader["CourseCode"]) ?? "",
             SectionId = Convert.ToInt32(reader["SectionID"]),
             SectionName = Convert.ToString(reader["SectionName"]) ?? "",
+            SessionId = Convert.ToInt32(reader["SessionID"]),
             ProgramId = Convert.ToInt32(reader["ProgramID"]),
             TeacherName = Convert.ToString(reader["TeacherName"]) ?? ""
         };
@@ -182,10 +186,13 @@ public class TeacherSynchronizationController : ControllerBase
         return Convert.ToInt32(await insertCommand.ExecuteScalarAsync());
     }
 
-    // Retrieves all comparable offered courses (teachers/sections) for same program and course
+    // Retrieves comparable offered courses in the SAME session for same program+course
+    // (includes all peer sections, even if their course folder was submitted).
     private async Task<List<SyncTeacherColumnDto>> GetComparableOfferedCoursesAsync(
         int programId,
-        int courseId)
+        int courseId,
+        int sessionId,
+        int currentOfferedCourseId)
     {
         var teachers = new List<SyncTeacherColumnDto>();
 
@@ -207,17 +214,13 @@ public class TeacherSynchronizationController : ControllerBase
                 ON u.UserID = oc.TeacherUserID
             WHERE oc.CourseID = @CourseID
             AND sess.ProgramID = @ProgramID
-            AND NOT EXISTS (
-                SELECT 1
-                FROM CourseFolders cf
-                WHERE cf.OfferedCourseID = oc.OfferedCourseID
-                AND cf.FolderStatus = 'Submitted'
-            )
+            AND s.SessionID = @SessionID
             ORDER BY s.SectionName, u.FullName;
         ", connection);
 
         command.Parameters.AddWithValue("@CourseID", courseId);
         command.Parameters.AddWithValue("@ProgramID", programId);
+        command.Parameters.AddWithValue("@SessionID", sessionId);
 
         await using var reader = await command.ExecuteReaderAsync();
 
@@ -239,9 +242,10 @@ public class TeacherSynchronizationController : ControllerBase
         return teachers;
     }
 
-    // Ensures progress tracking rows exist for all offered courses and topics
+    // Ensures progress tracking rows exist for all offered courses and session topics
     private async Task EnsureProgressRowsForAllAsync(
         int programCourseId,
+        int sessionId,
         List<int> offeredCourseIds)
     {
         if (offeredCourseIds.Count == 0)
@@ -267,6 +271,7 @@ public class TeacherSynchronizationController : ControllerBase
                     0
                 FROM CourseTopics t
                 WHERE t.ProgramCourseID = @ProgramCourseID
+                AND t.SessionID = @SessionID
                 AND NOT EXISTS
                 (
                     SELECT 1
@@ -278,15 +283,21 @@ public class TeacherSynchronizationController : ControllerBase
 
             command.Parameters.AddWithValue("@OfferedCourseID", offeredCourseId);
             command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+            command.Parameters.AddWithValue("@SessionID", sessionId);
 
             await command.ExecuteNonQueryAsync();
         }
     }
 
-    // Retrieves leaf-level topics for a given program course
-    private async Task<List<TopicInfo>> GetLeafTopicsAsync(int programCourseId)
+    // Retrieves leaf-level topics for a given program course + session,
+    // plus a parent map so completion on a parent counts for its leaves.
+    private async Task<(List<TopicInfo> Leaves, Dictionary<int, int?> ParentByTopicId)> GetLeafTopicsAsync(
+        int programCourseId,
+        int sessionId)
     {
-        var topics = new List<TopicInfo>();
+        var allTopics = new List<TopicInfo>();
+        var parentByTopicId = new Dictionary<int, int?>();
+        var childCounts = new Dictionary<int, int>();
 
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
@@ -294,16 +305,16 @@ public class TeacherSynchronizationController : ControllerBase
         var command = new SqlCommand(@"
             SELECT
                 t.TopicID,
+                t.ParentTopicID,
                 t.WeekNo,
                 t.TopicTitle,
                 t.DisplayOrder
             FROM CourseTopics t
             WHERE t.ProgramCourseID = @ProgramCourseID
-            AND NOT EXISTS
-            (
-                SELECT 1
-                FROM CourseTopics child
-                WHERE child.ParentTopicID = t.TopicID
+            AND t.SessionID = @SessionID
+            AND (
+                t.ContentStatus IS NULL
+                OR t.ContentStatus IN (N'Draft', N'PendingReview', N'Approved', N'Rejected')
             )
             ORDER BY
                 ISNULL(t.WeekNo, 999),
@@ -312,14 +323,26 @@ public class TeacherSynchronizationController : ControllerBase
         ", connection);
 
         command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+        command.Parameters.AddWithValue("@SessionID", sessionId);
 
         await using var reader = await command.ExecuteReaderAsync();
 
         while (await reader.ReadAsync())
         {
-            topics.Add(new TopicInfo
+            var topicId = Convert.ToInt32(reader["TopicID"]);
+            int? parentId = reader["ParentTopicID"] == DBNull.Value
+                ? null
+                : Convert.ToInt32(reader["ParentTopicID"]);
+
+            parentByTopicId[topicId] = parentId;
+            if (parentId is int pid)
             {
-                TopicId = Convert.ToInt32(reader["TopicID"]),
+                childCounts[pid] = childCounts.TryGetValue(pid, out var count) ? count + 1 : 1;
+            }
+
+            allTopics.Add(new TopicInfo
+            {
+                TopicId = topicId,
                 WeekNo = reader["WeekNo"] == DBNull.Value
                     ? null
                     : Convert.ToInt32(reader["WeekNo"]),
@@ -330,7 +353,11 @@ public class TeacherSynchronizationController : ControllerBase
             });
         }
 
-        return topics;
+        var leaves = allTopics
+            .Where(topic => !childCounts.ContainsKey(topic.TopicId))
+            .ToList();
+
+        return (leaves, parentByTopicId);
     }
 
     // Builds a dictionary mapping (offeredCourseId + topicId) to completion status
@@ -372,11 +399,41 @@ public class TeacherSynchronizationController : ControllerBase
         return map;
     }
 
+    // True when this topic or any ancestor is marked complete for the section.
+    // Needed because teachers often tick a parent/week topic; Common/Gaps use leaves only.
+    private static bool IsCompletedIncludingAncestors(
+        int offeredCourseId,
+        int topicId,
+        Dictionary<string, bool> progressMap,
+        Dictionary<int, int?> parentByTopicId)
+    {
+        var currentId = topicId;
+        var guard = 0;
+
+        while (guard++ < 64)
+        {
+            if (progressMap.TryGetValue($"{offeredCourseId}|{currentId}", out var completed) && completed)
+            {
+                return true;
+            }
+
+            if (!parentByTopicId.TryGetValue(currentId, out var parentId) || parentId == null)
+            {
+                return false;
+            }
+
+            currentId = parentId.Value;
+        }
+
+        return false;
+    }
+
     // Builds matrix representation of topic completion across all teachers
     private static List<SyncMatrixRowDto> BuildMatrix(
         List<TopicInfo> topics,
         List<SyncTeacherColumnDto> teachers,
-        Dictionary<string, bool> progressMap)
+        Dictionary<string, bool> progressMap,
+        Dictionary<int, int?> parentByTopicId)
     {
         var matrix = new List<SyncMatrixRowDto>();
 
@@ -391,8 +448,11 @@ public class TeacherSynchronizationController : ControllerBase
 
             foreach (var teacher in teachers)
             {
-                var key = $"{teacher.OfferedCourseId}|{topic.TopicId}";
-                var completed = progressMap.TryGetValue(key, out var value) && value;
+                var completed = IsCompletedIncludingAncestors(
+                    teacher.OfferedCourseId,
+                    topic.TopicId,
+                    progressMap,
+                    parentByTopicId);
 
                 row.Statuses.Add(new SyncTopicStatusDto
                 {
@@ -410,14 +470,25 @@ public class TeacherSynchronizationController : ControllerBase
         return matrix;
     }
 
-    // Extracts topics that are common (completed by all teachers)
+    // Topics covered by the selected section and at least one other section
     private static List<SyncCommonTopicDto> BuildCommonTopics(
-        List<SyncMatrixRowDto> matrix)
+        List<SyncMatrixRowDto> matrix,
+        int currentOfferedCourseId)
     {
         return matrix
             .Where(row =>
-                row.Statuses.Count > 0 &&
-                row.Statuses.All(status => status.IsCompleted))
+            {
+                var current = row.Statuses
+                    .FirstOrDefault(status => status.OfferedCourseId == currentOfferedCourseId);
+                if (current == null || !current.IsCompleted)
+                {
+                    return false;
+                }
+
+                return row.Statuses.Any(status =>
+                    status.OfferedCourseId != currentOfferedCourseId &&
+                    status.IsCompleted);
+            })
             .Select(row => new SyncCommonTopicDto
             {
                 TopicId = row.TopicId,
@@ -515,6 +586,7 @@ public class TeacherSynchronizationController : ControllerBase
         public string CourseCode { get; set; } = string.Empty;
         public int SectionId { get; set; }
         public string SectionName { get; set; } = string.Empty;
+        public int SessionId { get; set; }
         public int ProgramId { get; set; }
         public string TeacherName { get; set; } = string.Empty;
     }

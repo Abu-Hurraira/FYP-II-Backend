@@ -9,6 +9,8 @@ public partial class CourseAssessmentTypeClomapping
 
     public int ProgramCourseId { get; set; }
 
+    public int SessionId { get; set; }
+
     public int AssessmentTypeId { get; set; }
 
     public int Cloid { get; set; }
@@ -16,6 +18,10 @@ public partial class CourseAssessmentTypeClomapping
     public decimal? Percentage { get; set; }
 
     public int? UpdatedByUserId { get; set; }
+
+    public string ContentStatus { get; set; } = "Draft";
+
+    public int? SubmissionId { get; set; }
 
     public virtual AssessmentType AssessmentType { get; set; } = null!;
 

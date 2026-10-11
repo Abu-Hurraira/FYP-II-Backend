@@ -11,7 +11,7 @@ public partial class PeoPlomapping
 
     public int Ploid { get; set; }
 
-    public decimal? Percentage { get; set; }
+    public bool IsMapped { get; set; }
 
     public int? MappedByUserId { get; set; }
 }

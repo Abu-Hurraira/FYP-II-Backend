@@ -9,7 +9,13 @@ public partial class Clo
 
     public int ProgramCourseId { get; set; }
 
+    public int SessionId { get; set; }
+
     public string Clocode { get; set; } = null!;
+
+    public string ContentStatus { get; set; } = "Draft";
+
+    public int? SubmissionId { get; set; }
 
     public string Clodescription { get; set; } = null!;
 

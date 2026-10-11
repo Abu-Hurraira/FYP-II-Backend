@@ -23,61 +23,140 @@ public class HodCoursesDashboardService
 
     public async Task<HodCoursesDashboardDto> BuildAsync()
     {
-        var submittedIds = await _context.CourseFolders
-            .AsNoTracking()
-            .Where(cf => cf.FolderStatus == "Submitted")
-            .Select(cf => cf.OfferedCourseId)
-            .ToListAsync();
+        var offeredCourses = await LoadActiveOfferingsAsync();
+        if (offeredCourses.Count == 0)
+        {
+            return new HodCoursesDashboardDto();
+        }
 
-        var submittedSet = submittedIds.ToHashSet();
+        return new HodCoursesDashboardDto
+        {
+            Courses = await BuildBlocksAsync(offeredCourses, includeDetails: true)
+        };
+    }
 
-        var offeredCourses = await _context.OfferedCourses
+    /// <summary>
+    /// Fast first paint: course headers + counts + name lists only (no permissions / sync metrics).
+    /// </summary>
+    public async Task<HodCoursesDashboardDto> BuildSummaryAsync()
+    {
+        var offeredCourses = await LoadActiveOfferingsAsync();
+        if (offeredCourses.Count == 0)
+        {
+            return new HodCoursesDashboardDto();
+        }
+
+        return new HodCoursesDashboardDto
+        {
+            Courses = await BuildBlocksAsync(offeredCourses, includeDetails: false)
+        };
+    } 
+
+    /// <summary>
+    /// Full permissions + section progress for one course (loaded when HOD expands a row).
+    /// </summary>
+    public async Task<HodCourseDashboardBlockDto?> BuildCourseDetailAsync(int courseId)
+    {
+        var offeredCourses = await LoadActiveOfferingsAsync(courseId);
+        if (offeredCourses.Count == 0)
+        {
+            return null;
+        }
+
+        var blocks = await BuildBlocksAsync(offeredCourses, includeDetails: true);
+        return blocks.FirstOrDefault();
+    }
+
+    private async Task<List<OfferedCourse>> LoadActiveOfferingsAsync(int? courseId = null)
+    {
+        var query = _context.OfferedCourses
             .AsNoTracking()
             .Include(oc => oc.Course)
             .Include(oc => oc.Section)
                 .ThenInclude(s => s.Session)
                     .ThenInclude(sess => sess.Program)
             .Include(oc => oc.TeacherUser)
-            .Where(oc => !submittedSet.Contains(oc.OfferedCourseId))
+            .AsQueryable();
+
+        if (courseId.HasValue)
+        {
+            query = query.Where(oc => oc.CourseId == courseId.Value);
+        }
+
+        return await query
             .OrderBy(oc => oc.Course.CourseTitle)
             .ThenBy(oc => oc.Section.SectionName)
             .ThenBy(oc => oc.TeacherUser.FullName)
             .ToListAsync();
+    }
 
-        if (offeredCourses.Count == 0)
-        {
-            return new HodCoursesDashboardDto();
-        }
-
+    private async Task<List<HodCourseDashboardBlockDto>> BuildBlocksAsync(
+        List<OfferedCourse> offeredCourses,
+        bool includeDetails)
+    {
         var programCourseKeys = offeredCourses
             .Select(x => (x.Section.Session.ProgramId, x.CourseId))
             .Distinct()
             .ToList();
 
         var programCourseIdMap = await LoadProgramCourseIdsAsync(programCourseKeys);
-        var comparablesByKey = await LoadComparablesBulkAsync(programCourseKeys, submittedSet);
-        var leafTopicsByProgramCourse = await LoadLeafTopicsBulkAsync(programCourseIdMap.Values);
-        var allComparableIds = comparablesByKey.Values.SelectMany(x => x).Distinct().ToList();
-        var progressMap = await LoadProgressMapBulkAsync(allComparableIds);
-        var permissionGroupsByCourse = await _permissionService.BuildPermissionGroupsBulkAsync(
-            offeredCourses,
-            programCourseIdMap);
+
+        Dictionary<int, List<HodTeacherPermissionGroupDto>> permissionGroupsByCourse = new();
+        Dictionary<(int ProgramId, int CourseId, int SessionId), List<int>> comparablesByKey = new();
+        Dictionary<(int ProgramCourseId, int SessionId), List<int>> leafTopicsByProgramCourseSession = new();
+        Dictionary<string, bool> progressMap = new();
+
+        if (includeDetails)
+        {
+            var comparableKeys = offeredCourses
+                .Select(x => (x.Section.Session.ProgramId, x.CourseId, x.Section.SessionId))
+                .Distinct()
+                .ToList();
+
+            comparablesByKey = await LoadComparablesBulkAsync(comparableKeys);
+
+            var programCourseSessionKeys = offeredCourses
+                .Select(oc =>
+                {
+                    var programId = oc.Section.Session.ProgramId;
+                    programCourseIdMap.TryGetValue((programId, oc.CourseId), out var pcId);
+                    return (pcId, oc.Section.SessionId);
+                })
+                .Where(x => x.pcId > 0)
+                .Distinct()
+                .ToList();
+
+            leafTopicsByProgramCourseSession = await LoadLeafTopicsBulkAsync(programCourseSessionKeys);
+            var allComparableIds = comparablesByKey.Values
+                .SelectMany(x => x)
+                .Concat(offeredCourses.Select(x => x.OfferedCourseId))
+                .Distinct()
+                .ToList();
+            progressMap = await LoadProgressMapBulkAsync(allComparableIds);
+            permissionGroupsByCourse = await _permissionService.BuildPermissionGroupsBulkAsync(
+                offeredCourses,
+                programCourseIdMap);
+        }
 
         var blocks = new List<HodCourseDashboardBlockDto>();
 
         foreach (var courseGroup in offeredCourses.GroupBy(x => x.CourseId))
         {
             var sample = courseGroup.First().Course;
-            var sections = courseGroup
-                .Select(offering => BuildSectionProgress(
-                    offering,
-                    programCourseIdMap,
-                    comparablesByKey,
-                    leafTopicsByProgramCourse,
-                    progressMap))
+            var teacherNames = courseGroup
+                .Select(x => x.TeacherUser.FullName)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name)
+                .ToList();
+            var sectionNames = courseGroup
+                .Select(x => x.Section.SectionName)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name)
                 .ToList();
 
-            blocks.Add(new HodCourseDashboardBlockDto
+            var block = new HodCourseDashboardBlockDto
             {
                 CourseId = courseGroup.Key,
                 CourseTitle = sample.CourseTitle,
@@ -86,28 +165,55 @@ public class HodCoursesDashboardService
                 LabCreditHours = sample.LabCreditHours,
                 SectionCount = courseGroup.Select(x => x.SectionId).Distinct().Count(),
                 TeacherCount = courseGroup.Select(x => x.TeacherUserId).Distinct().Count(),
-                PermissionGroups = permissionGroupsByCourse.GetValueOrDefault(courseGroup.Key) ?? new(),
-                Sections = sections
-            });
+                TeacherNames = teacherNames,
+                SectionNames = sectionNames,
+                DetailsLoaded = includeDetails,
+                ProgramIds = courseGroup
+                    .Select(x => x.Section.Session.ProgramId)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToList()
+            };
+
+            if (includeDetails)
+            {
+                block.PermissionGroups =
+                    permissionGroupsByCourse.GetValueOrDefault(courseGroup.Key) ?? new();
+                block.Sections = courseGroup
+                    .Select(offering => BuildSectionProgress(
+                        offering,
+                        programCourseIdMap,
+                        comparablesByKey,
+                        leafTopicsByProgramCourseSession,
+                        progressMap))
+                    .ToList();
+            }
+
+            blocks.Add(block);
         }
 
-        return new HodCoursesDashboardDto { Courses = blocks };
+        return blocks;
     }
 
     private static HodSectionProgressDto BuildSectionProgress(
         OfferedCourse oc,
         Dictionary<(int ProgramId, int CourseId), int> programCourseIdMap,
-        Dictionary<(int ProgramId, int CourseId), List<int>> comparablesByKey,
-        Dictionary<int, List<int>> leafTopicsByProgramCourse,
+        Dictionary<(int ProgramId, int CourseId, int SessionId), List<int>> comparablesByKey,
+        Dictionary<(int ProgramCourseId, int SessionId), List<int>> leafTopicsByProgramCourseSession,
         Dictionary<string, bool> progressMap)
     {
         var programId = oc.Section.Session.ProgramId;
-        var key = (programId, oc.CourseId);
+        var sessionId = oc.Section.SessionId;
+        var key = (programId, oc.CourseId, sessionId);
         var comparableIds = comparablesByKey.GetValueOrDefault(key) ?? new List<int> { oc.OfferedCourseId };
+        if (!comparableIds.Contains(oc.OfferedCourseId))
+        {
+            comparableIds = comparableIds.Append(oc.OfferedCourseId).ToList();
+        }
 
-        programCourseIdMap.TryGetValue(key, out var programCourseId);
+        programCourseIdMap.TryGetValue((programId, oc.CourseId), out var programCourseId);
         var leafTopicIds = programCourseId > 0
-            ? leafTopicsByProgramCourse.GetValueOrDefault(programCourseId) ?? new List<int>()
+            ? leafTopicsByProgramCourseSession.GetValueOrDefault((programCourseId, sessionId)) ?? new List<int>()
             : new List<int>();
 
         var metrics = CourseSyncCalculator.Compute(
@@ -121,6 +227,7 @@ public class HodCoursesDashboardService
             OfferedCourseId = oc.OfferedCourseId,
             CourseId = oc.CourseId,
             ProgramId = programId,
+            ProgramCourseId = programCourseId,
             TeacherUserId = oc.TeacherUserId,
             TeacherName = oc.TeacherUser.FullName,
             SectionName = oc.Section.SectionName,
@@ -169,9 +276,8 @@ public class HodCoursesDashboardService
         return map;
     }
 
-    private async Task<Dictionary<(int ProgramId, int CourseId), List<int>>> LoadComparablesBulkAsync(
-        List<(int ProgramId, int CourseId)> keys,
-        HashSet<int> submittedSet)
+    private async Task<Dictionary<(int ProgramId, int CourseId, int SessionId), List<int>>> LoadComparablesBulkAsync(
+        List<(int ProgramId, int CourseId, int SessionId)> keys)
     {
         var map = keys.ToDictionary(k => k, _ => new List<int>());
 
@@ -182,28 +288,26 @@ public class HodCoursesDashboardService
 
         var programIds = keys.Select(k => k.ProgramId).Distinct().ToList();
         var courseIds = keys.Select(k => k.CourseId).Distinct().ToList();
+        var sessionIds = keys.Select(k => k.SessionId).Distinct().ToList();
         var keySet = keys.ToHashSet();
 
         var rows = await _context.OfferedCourses
             .AsNoTracking()
             .Where(oc => courseIds.Contains(oc.CourseId))
             .Where(oc => programIds.Contains(oc.Section.Session.ProgramId))
+            .Where(oc => sessionIds.Contains(oc.Section.SessionId))
             .Select(oc => new
             {
                 oc.OfferedCourseId,
                 oc.CourseId,
-                ProgramId = oc.Section.Session.ProgramId
+                ProgramId = oc.Section.Session.ProgramId,
+                SessionId = oc.Section.SessionId
             })
             .ToListAsync();
 
         foreach (var row in rows)
         {
-            if (submittedSet.Contains(row.OfferedCourseId))
-            {
-                continue;
-            }
-
-            var key = (row.ProgramId, row.CourseId);
+            var key = (row.ProgramId, row.CourseId, row.SessionId);
             if (keySet.Contains(key))
             {
                 map[key].Add(row.OfferedCourseId);
@@ -213,26 +317,39 @@ public class HodCoursesDashboardService
         return map;
     }
 
-    private async Task<Dictionary<int, List<int>>> LoadLeafTopicsBulkAsync(IEnumerable<int> programCourseIds)
+    private async Task<Dictionary<(int ProgramCourseId, int SessionId), List<int>>> LoadLeafTopicsBulkAsync(
+        IEnumerable<(int ProgramCourseId, int SessionId)> keys)
     {
-        var map = new Dictionary<int, List<int>>();
-        var ids = programCourseIds.Distinct().Where(id => id > 0).ToList();
+        var map = new Dictionary<(int ProgramCourseId, int SessionId), List<int>>();
+        var keyList = keys
+            .Where(k => k.ProgramCourseId > 0 && k.SessionId > 0)
+            .Distinct()
+            .ToList();
 
-        if (ids.Count == 0)
+        if (keyList.Count == 0)
         {
             return map;
         }
 
+        var programCourseIds = keyList.Select(k => k.ProgramCourseId).Distinct().ToList();
+        var sessionIds = keyList.Select(k => k.SessionId).Distinct().ToList();
+        var keySet = keyList.ToHashSet();
+
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
 
-        var idList = string.Join(",", ids);
+        var pcList = string.Join(",", programCourseIds);
+        var sessionList = string.Join(",", sessionIds);
         var command = new SqlCommand($@"
-            SELECT t.ProgramCourseID, t.TopicID
+            SELECT t.ProgramCourseID, t.SessionID, t.TopicID
             FROM CourseTopics t
-            WHERE t.ProgramCourseID IN ({idList})
+            WHERE t.ProgramCourseID IN ({pcList})
+            AND t.SessionID IN ({sessionList})
             AND NOT EXISTS (
-                SELECT 1 FROM CourseTopics child WHERE child.ParentTopicID = t.TopicID
+                SELECT 1
+                FROM CourseTopics child
+                WHERE child.ParentTopicID = t.TopicID
+                AND child.SessionID = t.SessionID
             );
         ", connection);
 
@@ -241,12 +358,19 @@ public class HodCoursesDashboardService
         while (await reader.ReadAsync())
         {
             var programCourseId = Convert.ToInt32(reader["ProgramCourseID"]);
+            var sessionId = Convert.ToInt32(reader["SessionID"]);
             var topicId = Convert.ToInt32(reader["TopicID"]);
+            var key = (programCourseId, sessionId);
 
-            if (!map.TryGetValue(programCourseId, out var topics))
+            if (!keySet.Contains(key))
+            {
+                continue;
+            }
+
+            if (!map.TryGetValue(key, out var topics))
             {
                 topics = new List<int>();
-                map[programCourseId] = topics;
+                map[key] = topics;
             }
 
             topics.Add(topicId);
@@ -287,27 +411,6 @@ public class HodCoursesDashboardService
         return map;
     }
 
-    private static bool IsSectionAName(string? sectionName)
-    {
-        if (string.IsNullOrWhiteSpace(sectionName))
-        {
-            return false;
-        }
-
-        var name = sectionName.Trim();
-
-        if (name.EndsWith("-A", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        if (name.Length >= 2 &&
-            char.ToUpperInvariant(name[^1]) == 'A' &&
-            char.IsDigit(name[^2]))
-        {
-            return true;
-        }
-
-        return string.Equals(name, "A", StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool IsSectionAName(string? sectionName) =>
+        SectionNameFormatter.IsSectionA(sectionName);
 }

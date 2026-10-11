@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FolderManagementSystemAPI.Models;
 using FolderManagementSystemAPI.DTOs;
+using FolderManagementSystemAPI.Services;
+using WebApplication1.Models.TeacherScaffold;
 
 namespace FolderManagementSystemAPI.Controllers
 {
@@ -11,11 +13,14 @@ namespace FolderManagementSystemAPI.Controllers
     public class CoursesController : ControllerBase
     {
         private readonly FolderManagementDbContext _context;
+        private readonly CourseCatalogVersionService _catalogVersionService;
 
-        // Constructor: Initializes the database context for accessing Courses table
-        public CoursesController(FolderManagementDbContext context)
+        public CoursesController(
+            FolderManagementDbContext context,
+            CourseCatalogVersionService catalogVersionService)
         {
             _context = context;
+            _catalogVersionService = catalogVersionService;
         }
 
         // GET: api/Courses
@@ -245,7 +250,7 @@ namespace FolderManagementSystemAPI.Controllers
         }
 
         // DELETE: api/Courses/1
-        // Deletes a course if it is not used in OfferedCourses
+        // Deletes a course from the database when it is not offered or PLO-mapped.
         [HttpDelete("{id:int}")]
         public async Task<IActionResult> DeleteCourse(int id)
         {
@@ -260,17 +265,60 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            // Prevent deletion if course is already assigned
-            var isUsedInOfferedCourses = await _context.OfferedCourses
-                .AnyAsync(o => o.CourseId == id);
+            var courseLabel = $"{course.CourseCode} — {course.CourseTitle}";
 
-            if (isUsedInOfferedCourses)
+            if (await _context.OfferedCourses.AnyAsync(o => o.CourseId == id))
             {
                 return BadRequest(new
                 {
                     success = false,
-                    message = "This course is already used in offered courses. Delete related offered courses first."
+                    message = $"Cannot remove course ({courseLabel}): it is already offered in a section."
                 });
+            }
+
+            var programCourseIds = await _context.AcademicProgramCourses
+                .Where(pc => pc.CourseId == id)
+                .Select(pc => pc.ProgramCourseId)
+                .ToListAsync();
+
+            if (programCourseIds.Count > 0)
+            {
+                var isPloMapped = await _context.ProgramCoursePlomappings.AnyAsync(m =>
+                    programCourseIds.Contains(m.ProgramCourseId) &&
+                    m.Percentage != null &&
+                    m.Percentage > 0);
+                if (isPloMapped)
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = $"Cannot remove course ({courseLabel}): it is mapped to one or more PLOs."
+                    });
+                }
+
+                if (await _context.Clos.AnyAsync(c => programCourseIds.Contains(c.ProgramCourseId)))
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = $"Cannot remove course ({courseLabel}): CLOs are already defined for it."
+                    });
+                }
+
+                var mappings = await _context.ProgramCoursePlomappings
+                    .Where(m => programCourseIds.Contains(m.ProgramCourseId))
+                    .ToListAsync();
+                _context.ProgramCoursePlomappings.RemoveRange(mappings);
+
+                var permissions = await _context.TeacherPermissions
+                    .Where(p => programCourseIds.Contains(p.ProgramCourseId))
+                    .ToListAsync();
+                _context.TeacherPermissions.RemoveRange(permissions);
+
+                var links = await _context.AcademicProgramCourses
+                    .Where(pc => pc.CourseId == id)
+                    .ToListAsync();
+                _context.AcademicProgramCourses.RemoveRange(links);
             }
 
             _context.Courses.Remove(course);
@@ -279,15 +327,18 @@ namespace FolderManagementSystemAPI.Controllers
             return Ok(new
             {
                 success = true,
-                message = "Course deleted successfully."
+                message = "Course removed from the database successfully."
             });
         }
 
         // POST: api/Courses/import
-        // Imports courses from an Excel (.xlsx) file with validation and duplicate handling
+        // Imports courses from an Excel (.xlsx) file with validation and duplicate handling.
+        // Optional form field programId: re-links existing/new courses into that program catalog.
         [HttpPost("import")]
         [Consumes("multipart/form-data")]
-        public async Task<IActionResult> ImportCoursesFromExcel([FromForm] IFormFile file)
+        public async Task<IActionResult> ImportCoursesFromExcel(
+            [FromForm] IFormFile file,
+            [FromForm] int? programId = null)
         {
             if (file == null || file.Length == 0)
             {
@@ -309,9 +360,19 @@ namespace FolderManagementSystemAPI.Controllers
                 });
             }
 
-            var insertedCourses = new List<object>();
-            var skippedCourses = new List<object>();
-            var errors = new List<string>();
+            if (programId.HasValue)
+            {
+                var programExists = await _context.AcademicPrograms
+                    .AnyAsync(p => p.ProgramId == programId.Value);
+                if (!programExists)
+                {
+                    return BadRequest(new
+                    {
+                        success = false,
+                        message = "Selected program was not found."
+                    });
+                }
+            }
 
             try
             {
@@ -342,32 +403,28 @@ namespace FolderManagementSystemAPI.Controllers
 
                 // Map headers dynamically
                 var headerRow = rows[0];
-                var headerMap = new Dictionary<string, int>();
-
-                foreach (var cell in headerRow.CellsUsed())
-                {
-                    var normalizedHeader = NormalizeHeader(cell.GetString());
-
-                    if (!headerMap.ContainsKey(normalizedHeader))
-                    {
-                        headerMap.Add(normalizedHeader, cell.Address.ColumnNumber);
-                    }
-                }
-
-                // Detect column indexes
-                int courseCodeCol = GetColumnIndex(headerMap, new[] { "coursecode", "code", "courseid" });
-                int courseNameCol = GetColumnIndex(headerMap, new[] { "coursename", "coursetitle", "title", "name" });
-                int classCreditCol = GetColumnIndex(headerMap, new[] { "classcredithours", "classcredit", "credithoursclass", "classhours" });
-                int labCreditCol = GetColumnIndex(headerMap, new[] { "labcredithours", "labcredit", "credithourslab", "labhours" });
+                var headerMap = ExcelImportHelper.BuildHeaderMap(headerRow);
+                int courseCodeCol = ExcelImportHelper.GetColumnIndex(headerMap, ExcelImportHelper.CourseCodeHeaders);
+                int courseNameCol = ExcelImportHelper.GetColumnIndex(headerMap, ExcelImportHelper.CourseTitleHeaders);
+                int classCreditCol = ExcelImportHelper.GetColumnIndex(headerMap, "classcredithours", "classcredit", "credithoursclass", "classhours");
+                int labCreditCol = ExcelImportHelper.GetColumnIndex(headerMap, "labcredithours", "labcredit", "credithourslab", "labhours");
 
                 if (courseCodeCol == 0 || courseNameCol == 0)
                 {
                     return BadRequest(new
                     {
                         success = false,
-                        message = "Excel file must contain Course Code and Course Name columns."
+                        message = "Excel file must contain Course Code (or Course_N) and Course Title (or Course Name)."
                     });
                 }
+
+                var existingCourses = await _context.Courses.ToListAsync();
+                var insertedCourses = new List<object>();
+                var matchedCourses = new List<object>();
+                var skippedCourses = new List<object>();
+                var errors = new List<string>();
+                var linkCourseIds = new List<int>();
+                var versionSnapshot = new List<CatalogVersionSnapshotItem>();
 
                 // Process each row
                 for (int i = 1; i < rows.Count; i++)
@@ -395,40 +452,75 @@ namespace FolderManagementSystemAPI.Controllers
 
                     if (string.IsNullOrWhiteSpace(courseTitle))
                     {
-                        errors.Add($"Row {excelRowNumber}: Course Name is missing.");
+                        errors.Add($"Row {excelRowNumber}: Course Title is missing.");
                         continue;
                     }
 
                     int? classCreditHours = TryParseNullableInt(classCreditText);
                     int? labCreditHours = TryParseNullableInt(labCreditText);
 
-                    // Duplicate checks
-                    var codeExists = await _context.Courses
-                        .AnyAsync(c => c.CourseCode.ToLower() == courseCode.ToLower());
-
-                    if (codeExists)
+                    // Already in global Courses catalog — return it so HOD can re-link to program.
+                    var existingByCode = existingCourses.FirstOrDefault(c =>
+                        ExcelImportHelper.CourseEquals(c.CourseCode, courseCode));
+                    if (existingByCode != null)
                     {
-                        skippedCourses.Add(new
-                        {
-                            row = excelRowNumber,
-                            courseCode,
+                        var titleChanged = !string.Equals(
+                            existingByCode.CourseTitle.Trim(),
                             courseTitle,
-                            reason = "Course code already exists."
+                            StringComparison.OrdinalIgnoreCase);
+                        var creditsChanged =
+                            (classCreditHours.HasValue && existingByCode.ClassCreditHours != classCreditHours) ||
+                            (labCreditHours.HasValue && existingByCode.LabCreditHours != labCreditHours);
+
+                        if (titleChanged)
+                        {
+                            existingByCode.CourseTitle = courseTitle.Trim();
+                        }
+
+                        if (classCreditHours.HasValue)
+                        {
+                            existingByCode.ClassCreditHours = classCreditHours;
+                        }
+
+                        if (labCreditHours.HasValue)
+                        {
+                            existingByCode.LabCreditHours = labCreditHours;
+                        }
+
+                        if (titleChanged || creditsChanged)
+                        {
+                            await _context.SaveChangesAsync();
+                        }
+
+                        linkCourseIds.Add(existingByCode.CourseId);
+                        matchedCourses.Add(new
+                        {
+                            courseId = existingByCode.CourseId,
+                            courseCode = existingByCode.CourseCode,
+                            courseTitle = existingByCode.CourseTitle,
+                            classCreditHours = existingByCode.ClassCreditHours,
+                            labCreditHours = existingByCode.LabCreditHours,
+                            reason = "Course already exists in catalog (re-link to program)."
+                        });
+                        versionSnapshot.Add(new CatalogVersionSnapshotItem
+                        {
+                            CourseCode = existingByCode.CourseCode,
+                            CourseTitle = existingByCode.CourseTitle,
+                            ClassCreditHours = existingByCode.ClassCreditHours,
+                            LabCreditHours = existingByCode.LabCreditHours
                         });
                         continue;
                     }
 
-                    var titleExists = await _context.Courses
-                        .AnyAsync(c => c.CourseTitle.ToLower() == courseTitle.ToLower());
-
-                    if (titleExists)
+                    if (existingCourses.Any(c =>
+                        string.Equals(c.CourseTitle.Trim(), courseTitle, StringComparison.OrdinalIgnoreCase)))
                     {
                         skippedCourses.Add(new
                         {
                             row = excelRowNumber,
                             courseCode,
                             courseTitle,
-                            reason = "Course title already exists."
+                            reason = "Course title already exists under a different code."
                         });
                         continue;
                     }
@@ -436,23 +528,77 @@ namespace FolderManagementSystemAPI.Controllers
                     // Insert course
                     var course = new Course
                     {
-                        CourseCode = courseCode,
-                        CourseTitle = courseTitle,
+                        CourseCode = courseCode.Trim(),
+                        CourseTitle = courseTitle.Trim(),
                         ClassCreditHours = classCreditHours,
                         LabCreditHours = labCreditHours
                     };
 
                     _context.Courses.Add(course);
                     await _context.SaveChangesAsync();
+                    existingCourses.Add(course);
+                    linkCourseIds.Add(course.CourseId);
 
                     insertedCourses.Add(new
                     {
-                        course.CourseId,
-                        course.CourseCode,
-                        course.CourseTitle,
-                        course.ClassCreditHours,
-                        course.LabCreditHours
+                        courseId = course.CourseId,
+                        courseCode = course.CourseCode,
+                        courseTitle = course.CourseTitle,
+                        classCreditHours = course.ClassCreditHours,
+                        labCreditHours = course.LabCreditHours
                     });
+                    versionSnapshot.Add(new CatalogVersionSnapshotItem
+                    {
+                        CourseCode = course.CourseCode,
+                        CourseTitle = course.CourseTitle,
+                        ClassCreditHours = course.ClassCreditHours,
+                        LabCreditHours = course.LabCreditHours
+                    });
+                }
+
+                var linkedCount = 0;
+                if (programId.HasValue && linkCourseIds.Count > 0)
+                {
+                    var uniqueIds = linkCourseIds.Distinct().ToList();
+                    var alreadyLinked = await _context.AcademicProgramCourses
+                        .Where(pc => pc.ProgramId == programId.Value && uniqueIds.Contains(pc.CourseId))
+                        .Select(pc => pc.CourseId)
+                        .ToListAsync();
+                    var alreadySet = alreadyLinked.ToHashSet();
+
+                    foreach (var courseId in uniqueIds)
+                    {
+                        if (alreadySet.Contains(courseId))
+                        {
+                            continue;
+                        }
+
+                        _context.AcademicProgramCourses.Add(new AcademicProgramCourse
+                        {
+                            ProgramId = programId.Value,
+                            CourseId = courseId
+                        });
+                        linkedCount++;
+                    }
+
+                    if (linkedCount > 0)
+                    {
+                        await _context.SaveChangesAsync();
+                    }
+                }
+
+                int? catalogVersionId = null;
+                string? catalogVersionLabel = null;
+                var catalogVersionCreated = false;
+                if (programId.HasValue && versionSnapshot.Count > 0)
+                {
+                    var (version, createdNew) = await _catalogVersionService.EnsureVersionFromSnapshotAsync(
+                        programId.Value,
+                        file.FileName,
+                        versionSnapshot);
+                    catalogVersionId = version.CatalogVersionId;
+                    catalogVersionLabel = version.VersionLabel;
+                    catalogVersionCreated = createdNew;
                 }
 
                 return Ok(new
@@ -460,9 +606,15 @@ namespace FolderManagementSystemAPI.Controllers
                     success = true,
                     message = "Course import completed.",
                     insertedCount = insertedCourses.Count,
+                    matchedCount = matchedCourses.Count,
+                    linkedCount,
                     skippedCount = skippedCourses.Count,
                     errorCount = errors.Count,
+                    catalogVersionId,
+                    catalogVersionLabel,
+                    catalogVersionCreated,
                     insertedCourses,
+                    matchedCourses,
                     skippedCourses,
                     errors
                 });

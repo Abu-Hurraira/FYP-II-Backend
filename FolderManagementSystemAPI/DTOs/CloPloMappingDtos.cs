@@ -47,6 +47,8 @@ public class CloPloMatrixDto
 public class SaveCloPloSingleCellDto
 {
     public int UpdatedByUserId { get; set; }
+    public int? SessionId { get; set; }
+    public int? OfferedCourseId { get; set; }
     public int CloId { get; set; }
     public int PloId { get; set; }
     public decimal? Percentage { get; set; }

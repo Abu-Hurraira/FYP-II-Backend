@@ -1,4 +1,4 @@
-﻿using ClosedXML.Excel;
+using ClosedXML.Excel;
 using FolderManagementSystemAPI.DTOs;
 using FolderManagementSystemAPI.Models;
 using FolderManagementSystemAPI.Services;
@@ -17,16 +17,22 @@ public class TeacherWeeklyContentController : ControllerBase
     private readonly IWebHostEnvironment _environment;
     private readonly string _connectionString;
     private readonly TeacherPermissionService _permissionService;
+    private readonly ContentSubmissionService _contentSubmissionService;
+    private readonly CourseFolderProvisioningService _folderProvisioning;
 
     // Constructor initializes DB context, environment, and connection string
     public TeacherWeeklyContentController(
         FolderManagementDbContext context,
         IWebHostEnvironment environment,
-        TeacherPermissionService permissionService)
+        TeacherPermissionService permissionService,
+        ContentSubmissionService contentSubmissionService,
+        CourseFolderProvisioningService folderProvisioning)
     {
         _context = context;
         _environment = environment;
         _permissionService = permissionService;
+        _contentSubmissionService = contentSubmissionService;
+        _folderProvisioning = folderProvisioning;
         _connectionString = _context.Database.GetConnectionString()
             ?? throw new InvalidOperationException("Database connection string not found.");
     }
@@ -36,6 +42,7 @@ public class TeacherWeeklyContentController : ControllerBase
     {
         public int ProgramCourseId { get; set; }
         public int ProgramId { get; set; }
+        public int SessionId { get; set; }
         public int CourseId { get; set; }
         public int TeacherUserId { get; set; }
         public string CourseTitle { get; set; } = string.Empty;
@@ -55,16 +62,44 @@ public class TeacherWeeklyContentController : ControllerBase
             return NotFound(new { message = "Offered course not found." });
         }
 
-        await InitializeProgressRowsAsync(offeredCourseId, courseContext.ProgramCourseId);
+        return Ok(await BuildWeeklyContentResponseAsync(
+            offeredCourseId,
+            courseContext,
+            teacherUserId));
+    }
 
-        var topics = await LoadTopicTreeAsync(offeredCourseId, courseContext.ProgramCourseId);
-        var progress = CalculateTreeProgress(topics);
+    private async Task<WeeklyContentDto> BuildWeeklyContentResponseAsync(
+        int offeredCourseId,
+        OfferedCourseContextDto courseContext,
+        int? teacherUserId = null)
+    {
         var effectiveTeacherUserId = teacherUserId ?? courseContext.TeacherUserId;
         var permissions = await _permissionService.GetTeacherFlagsAsync(
             effectiveTeacherUserId,
             courseContext.ProgramCourseId);
+        var canViewAll = _contentSubmissionService.CanViewAllStatuses(
+            permissions,
+            ContentSubmissionTypeCodes.WeeklyContent);
+        var visibleStatuses = _contentSubmissionService.VisibleContentStatuses(canViewAll);
 
-        return Ok(new WeeklyContentDto
+        await InitializeProgressRowsAsync(
+            offeredCourseId,
+            courseContext.ProgramCourseId,
+            courseContext.SessionId,
+            visibleStatuses);
+
+        var topics = await LoadTopicTreeAsync(
+            offeredCourseId,
+            courseContext.ProgramCourseId,
+            courseContext.SessionId,
+            visibleStatuses);
+        var progress = CalculateTreeProgress(topics);
+        var contentStatuses = await _contentSubmissionService.GetStatusesAsync(
+            courseContext.ProgramCourseId,
+            effectiveTeacherUserId,
+            courseContext.SessionId);
+
+        return new WeeklyContentDto
         {
             OfferedCourseId = offeredCourseId,
             ProgramCourseId = courseContext.ProgramCourseId,
@@ -73,8 +108,9 @@ public class TeacherWeeklyContentController : ControllerBase
             HasWeeklyContent = topics.Any(),
             ProgressPercentage = topics.Any() ? progress : null,
             Permissions = permissions,
+            ContentStatuses = contentStatuses,
             Weeks = topics
-        });
+        };
     }
 
     // Loads weekly content data directly from database and initializes progress
@@ -88,8 +124,397 @@ public class TeacherWeeklyContentController : ControllerBase
             return NotFound(new { message = "Offered course not found." });
         }
 
-        await InitializeProgressRowsAsync(offeredCourseId, courseContext.ProgramCourseId);
         return await GetWeeklyContent(offeredCourseId);
+    }
+
+    /// <summary>
+    /// Previous schemes of study that have weekly topics for the same subject.
+    /// </summary>
+    [HttpGet("{offeredCourseId:int}/load-sources/schemes")]
+    public async Task<ActionResult<List<WeeklyTopicLoadSchemeDto>>> ListLoadSourceSchemes(
+        int offeredCourseId,
+        [FromQuery] int teacherUserId)
+    {
+        var courseContext = await GetOfferedCourseContextAsync(offeredCourseId);
+        if (courseContext == null)
+        {
+            return NotFound(new { message = "Offered course not found." });
+        }
+
+        if (!await _permissionService.HasPermissionAsync(
+                teacherUserId,
+                courseContext.ProgramCourseId,
+                TeacherPermissionTypes.UploadWeeklyContent))
+        {
+            return BadRequest(new { message = "You do not have permission to upload or edit course content." });
+        }
+
+        var schemesRaw = await (
+            from topic in _context.CourseTopics.AsNoTracking()
+            join session in _context.AcademicSessions.AsNoTracking()
+                on topic.SessionId equals session.SessionId
+            where topic.ProgramCourseId == courseContext.ProgramCourseId
+                  && topic.SessionId != courseContext.SessionId
+            group topic by new
+            {
+                session.SessionId,
+                session.SessionTitle,
+                session.AcademicYear,
+                session.StartDate
+            }
+            into g
+            select new
+            {
+                g.Key.SessionId,
+                g.Key.SessionTitle,
+                g.Key.AcademicYear,
+                g.Key.StartDate,
+                TopicCount = g.Count(),
+                WeekCount = g.Count(t => t.ParentTopicId == null)
+            }
+        ).ToListAsync();
+
+        var schemes = schemesRaw
+            .Where(s => s.WeekCount > 0)
+            .OrderByDescending(s => s.StartDate)
+            .ThenByDescending(s => s.SessionTitle)
+            .Select(s => new WeeklyTopicLoadSchemeDto
+            {
+                SessionId = s.SessionId,
+                SchemeLabel = s.SessionTitle,
+                AcademicYear = s.AcademicYear,
+                StartDate = s.StartDate,
+                TopicCount = s.TopicCount,
+                WeekCount = s.WeekCount
+            })
+            .ToList();
+
+        return Ok(schemes);
+    }
+
+    /// <summary>
+    /// Top-level week topics from a previous scheme (with children included on apply).
+    /// </summary>
+    [HttpGet("{offeredCourseId:int}/load-sources/schemes/{sourceSessionId:int}/topics")]
+    public async Task<ActionResult<WeeklyTopicLoadSchemeDetailDto>> GetLoadSourceTopics(
+        int offeredCourseId,
+        int sourceSessionId,
+        [FromQuery] int teacherUserId)
+    {
+        var courseContext = await GetOfferedCourseContextAsync(offeredCourseId);
+        if (courseContext == null)
+        {
+            return NotFound(new { message = "Offered course not found." });
+        }
+
+        if (!await _permissionService.HasPermissionAsync(
+                teacherUserId,
+                courseContext.ProgramCourseId,
+                TeacherPermissionTypes.UploadWeeklyContent))
+        {
+            return BadRequest(new { message = "You do not have permission to upload or edit course content." });
+        }
+
+        if (sourceSessionId == courseContext.SessionId)
+        {
+            return BadRequest(new { message = "Pick a previous scheme of study, not the current session." });
+        }
+
+        var session = await _context.AcademicSessions
+            .AsNoTracking()
+            .FirstOrDefaultAsync(s => s.SessionId == sourceSessionId);
+
+        if (session == null)
+        {
+            return NotFound(new { message = "Scheme of study was not found." });
+        }
+
+        var sourceRoots = await _context.CourseTopics
+            .AsNoTracking()
+            .Where(t =>
+                t.ProgramCourseId == courseContext.ProgramCourseId &&
+                t.SessionId == sourceSessionId &&
+                t.ParentTopicId == null)
+            .OrderBy(t => t.WeekNo ?? 999)
+            .ThenBy(t => t.DisplayOrder ?? 999)
+            .ThenBy(t => t.TopicId)
+            .ToListAsync();
+
+        var currentRootTitles = await _context.CourseTopics
+            .AsNoTracking()
+            .Where(t =>
+                t.ProgramCourseId == courseContext.ProgramCourseId &&
+                t.SessionId == courseContext.SessionId &&
+                t.ParentTopicId == null)
+            .Select(t => new { t.WeekNo, t.TopicTitle })
+            .ToListAsync();
+
+        var currentKeys = currentRootTitles
+            .Select(t => $"{t.WeekNo ?? 0}|{(t.TopicTitle ?? string.Empty).Trim().ToUpperInvariant()}")
+            .ToHashSet(StringComparer.Ordinal);
+
+        var rootIds = sourceRoots.Select(t => t.TopicId).ToList();
+        var childCounts = await _context.CourseTopics
+            .AsNoTracking()
+            .Where(t =>
+                t.ProgramCourseId == courseContext.ProgramCourseId &&
+                t.SessionId == sourceSessionId &&
+                t.ParentTopicId != null &&
+                rootIds.Contains(t.ParentTopicId.Value))
+            .GroupBy(t => t.ParentTopicId!.Value)
+            .Select(g => new { TopicId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.TopicId, x => x.Count);
+
+        var cloByTopic = await (
+            from map in _context.CourseTopicClomappings.AsNoTracking()
+            join clo in _context.Clos.AsNoTracking() on map.Cloid equals clo.Cloid
+            where rootIds.Contains(map.TopicId)
+            select new { map.TopicId, clo.Clocode }
+        ).ToListAsync();
+
+        var cloLookup = cloByTopic
+            .GroupBy(x => x.TopicId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(x => x.Clocode).Where(c => !string.IsNullOrWhiteSpace(c)).Distinct().ToList());
+
+        var items = sourceRoots.Select(t =>
+        {
+            var key = $"{t.WeekNo ?? 0}|{t.TopicTitle.Trim().ToUpperInvariant()}";
+            return new WeeklyTopicLoadItemDto
+            {
+                TopicId = t.TopicId,
+                WeekNo = t.WeekNo,
+                TopicTitle = t.TopicTitle,
+                TopicDescription = t.TopicDescription,
+                ChildCount = childCounts.TryGetValue(t.TopicId, out var count) ? count : 0,
+                CloCodes = cloLookup.TryGetValue(t.TopicId, out var codes) ? codes : new List<string>(),
+                AlreadyInCurrent = currentKeys.Contains(key)
+            };
+        }).ToList();
+
+        return Ok(new WeeklyTopicLoadSchemeDetailDto
+        {
+            SessionId = session.SessionId,
+            SchemeLabel = session.SessionTitle,
+            Items = items
+        });
+    }
+
+    [HttpPost("{offeredCourseId:int}/load-sources/apply")]
+    public async Task<ActionResult<ApplyWeeklyTopicsFromSchemeResultDto>> ApplyTopicsFromScheme(
+        int offeredCourseId,
+        [FromBody] ApplyWeeklyTopicsFromSchemeDto dto)
+    {
+        if (dto.TeacherUserId <= 0)
+        {
+            return BadRequest(new { message = "teacherUserId is required." });
+        }
+
+        if (dto.TopicIds == null || dto.TopicIds.Count == 0)
+        {
+            return BadRequest(new { message = "Select at least one week topic to add." });
+        }
+
+        var courseContext = await GetOfferedCourseContextAsync(offeredCourseId);
+        if (courseContext == null)
+        {
+            return NotFound(new { message = "Offered course not found." });
+        }
+
+        if (!await _permissionService.HasPermissionAsync(
+                dto.TeacherUserId,
+                courseContext.ProgramCourseId,
+                TeacherPermissionTypes.UploadWeeklyContent))
+        {
+            return BadRequest(new { message = "You do not have permission to upload or edit course content." });
+        }
+
+        try
+        {
+            await _contentSubmissionService.EnsureContentTypeEditableAsync(
+                courseContext.ProgramCourseId,
+                courseContext.SessionId,
+                ContentSubmissionTypeCodes.WeeklyContent);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+
+        if (dto.SourceSessionId == courseContext.SessionId)
+        {
+            return BadRequest(new { message = "Pick a previous scheme of study, not the current session." });
+        }
+
+        var canMapClos = await _permissionService.HasPermissionAsync(
+            dto.TeacherUserId,
+            courseContext.ProgramCourseId,
+            TeacherPermissionTypes.ManageClos);
+
+        var sourceTopics = await _context.CourseTopics
+            .AsNoTracking()
+            .Where(t =>
+                t.ProgramCourseId == courseContext.ProgramCourseId &&
+                t.SessionId == dto.SourceSessionId)
+            .OrderBy(t => t.WeekNo ?? 999)
+            .ThenBy(t => t.ParentTopicId == null ? 0 : 1)
+            .ThenBy(t => t.DisplayOrder ?? 999)
+            .ThenBy(t => t.TopicId)
+            .ToListAsync();
+
+        if (sourceTopics.Count == 0)
+        {
+            return BadRequest(new { message = "No topics found in the selected scheme of study." });
+        }
+
+        var byId = sourceTopics.ToDictionary(t => t.TopicId);
+        var selectedRoots = dto.TopicIds
+            .Distinct()
+            .Where(id => byId.TryGetValue(id, out var topic) && topic.ParentTopicId == null)
+            .ToList();
+
+        if (selectedRoots.Count == 0)
+        {
+            return BadRequest(new { message = "Select at least one week topic from the scheme." });
+        }
+
+        var toCopyIds = new List<int>();
+        var queue = new Queue<int>(selectedRoots);
+        var visited = new HashSet<int>();
+
+        while (queue.Count > 0)
+        {
+            var id = queue.Dequeue();
+            if (!visited.Add(id) || !byId.ContainsKey(id))
+            {
+                continue;
+            }
+
+            toCopyIds.Add(id);
+            foreach (var child in sourceTopics.Where(t => t.ParentTopicId == id).OrderBy(t => t.DisplayOrder ?? 999).ThenBy(t => t.TopicId))
+            {
+                queue.Enqueue(child.TopicId);
+            }
+        }
+
+        var ordered = toCopyIds.Select(id => byId[id]).ToList();
+
+        var sourceCloCodes = await (
+            from map in _context.CourseTopicClomappings.AsNoTracking()
+            join clo in _context.Clos.AsNoTracking() on map.Cloid equals clo.Cloid
+            where ordered.Select(t => t.TopicId).Contains(map.TopicId)
+            select new { map.TopicId, clo.Clocode }
+        ).ToListAsync();
+
+        var cloLookup = sourceCloCodes
+            .GroupBy(x => x.TopicId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(x => x.Clocode).Where(c => !string.IsNullOrWhiteSpace(c)).Distinct().ToList());
+
+        var idMap = new Dictionary<int, int>();
+        var created = 0;
+        var already = 0;
+        var mappedClos = 0;
+
+        foreach (var source in ordered)
+        {
+            int? newParentId = null;
+            if (source.ParentTopicId != null)
+            {
+                if (!idMap.TryGetValue(source.ParentTopicId.Value, out var mappedParent))
+                {
+                    continue;
+                }
+
+                newParentId = mappedParent;
+            }
+
+            var beforeExists = await TopicExistsAsync(
+                courseContext.ProgramCourseId,
+                courseContext.SessionId,
+                newParentId,
+                source.TopicTitle);
+
+            var newTopicId = await CreateOrGetTopicAsync(
+                courseContext.ProgramCourseId,
+                courseContext.SessionId,
+                newParentId,
+                source.WeekNo ?? 1,
+                source.TopicTitle.Trim(),
+                source.TopicDescription,
+                source.DisplayOrder);
+
+            idMap[source.TopicId] = newTopicId;
+
+            if (beforeExists)
+            {
+                already++;
+            }
+            else
+            {
+                created++;
+            }
+
+            if (canMapClos && cloLookup.TryGetValue(source.TopicId, out var codes))
+            {
+                foreach (var code in codes)
+                {
+                    if (await MapTopicToCloByCodeAsync(
+                            courseContext.ProgramCourseId,
+                            courseContext.SessionId,
+                            newTopicId,
+                            code))
+                    {
+                        mappedClos++;
+                    }
+                }
+            }
+        }
+
+        await InitializeProgressRowsAsync(
+            offeredCourseId,
+            courseContext.ProgramCourseId,
+            courseContext.SessionId,
+            new[] { ContentStatuses.Draft, ContentStatuses.PendingReview, ContentStatuses.Approved, ContentStatuses.Rejected });
+
+        var result = new ApplyWeeklyTopicsFromSchemeResultDto
+        {
+            CreatedCount = created,
+            AlreadyExistCount = already,
+            MappedCloCount = mappedClos,
+            Message = $"Added {created} · Already present {already} · CLO links {mappedClos}"
+        };
+
+        return Ok(result);
+    }
+
+    private async Task<bool> TopicExistsAsync(
+        int programCourseId,
+        int sessionId,
+        int? parentTopicId,
+        string topicTitle)
+    {
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+
+        var selectCommand = new SqlCommand(@"
+            SELECT TopicID
+            FROM CourseTopics
+            WHERE ProgramCourseID = @ProgramCourseID
+            AND SessionID = @SessionID
+            AND TopicTitle = @TopicTitle
+            AND ((@ParentTopicID IS NULL AND ParentTopicID IS NULL) OR ParentTopicID = @ParentTopicID);
+        ", connection);
+
+        selectCommand.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+        selectCommand.Parameters.AddWithValue("@SessionID", sessionId);
+        selectCommand.Parameters.AddWithValue("@TopicTitle", topicTitle.Trim());
+        selectCommand.Parameters.AddWithValue("@ParentTopicID", (object?)parentTopicId ?? DBNull.Value);
+
+        var existing = await selectCommand.ExecuteScalarAsync();
+        return existing != null && existing != DBNull.Value;
     }
 
     // Adds a new weekly topic and optionally maps CLO codes to it
@@ -118,9 +543,21 @@ public class TeacherWeeklyContentController : ControllerBase
         if (!await _permissionService.HasPermissionAsync(
                 dto.TeacherUserId,
                 courseContext.ProgramCourseId,
-                TeacherPermissionTypes.UploadCourseContent))
+                TeacherPermissionTypes.UploadWeeklyContent))
         {
             return BadRequest(new { message = "You do not have permission to upload or edit course content." });
+        }
+
+        try
+        {
+            await _contentSubmissionService.EnsureContentTypeEditableAsync(
+                courseContext.ProgramCourseId,
+                courseContext.SessionId,
+                ContentSubmissionTypeCodes.WeeklyContent);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
         }
 
         var cloCodes = dto.CloCodes?
@@ -137,6 +574,7 @@ public class TeacherWeeklyContentController : ControllerBase
 
         var topicId = await CreateOrGetTopicAsync(
             courseContext.ProgramCourseId,
+            courseContext.SessionId,
             dto.ParentTopicId,
             dto.WeekNo,
             dto.TopicTitle.Trim(),
@@ -147,12 +585,15 @@ public class TeacherWeeklyContentController : ControllerBase
         {
             foreach (var cloCode in dto.CloCodes.Where(x => !string.IsNullOrWhiteSpace(x)))
             {
-                await MapTopicToCloByCodeAsync(courseContext.ProgramCourseId, topicId, cloCode.Trim());
+                await MapTopicToCloByCodeAsync(
+                    courseContext.ProgramCourseId,
+                    courseContext.SessionId,
+                    topicId,
+                    cloCode.Trim());
             }
         }
 
-        await InitializeProgressRowsAsync(offeredCourseId, courseContext.ProgramCourseId);
-        return await GetWeeklyContent(offeredCourseId);
+        return await GetWeeklyContent(offeredCourseId, dto.TeacherUserId);
     }
 
     // Updates completion status of a topic (and its descendants)
@@ -169,7 +610,10 @@ public class TeacherWeeklyContentController : ControllerBase
             return NotFound(new { message = "Offered course not found." });
         }
 
-        var topicExists = await TopicBelongsToProgramCourseAsync(topicId, courseContext.ProgramCourseId);
+        var topicExists = await TopicBelongsToProgramCourseAsync(
+            topicId,
+            courseContext.ProgramCourseId,
+            courseContext.SessionId);
 
         if (!topicExists)
         {
@@ -183,7 +627,7 @@ public class TeacherWeeklyContentController : ControllerBase
             await UpsertTopicProgressAsync(offeredCourseId, id, dto.IsCompleted, dto.TeacherUserId);
         }
 
-        return await GetWeeklyContent(offeredCourseId);
+        return await GetWeeklyContent(offeredCourseId, dto.TeacherUserId);
     }
 
     // Uploads an Excel file and imports weekly content structure from it
@@ -217,12 +661,27 @@ public class TeacherWeeklyContentController : ControllerBase
         if (!await _permissionService.HasPermissionAsync(
                 uploadedByUserId,
                 courseContext.ProgramCourseId,
-                TeacherPermissionTypes.UploadCourseContent))
+                TeacherPermissionTypes.UploadWeeklyContent))
         {
             return BadRequest(new { message = "You do not have permission to upload course content." });
         }
 
-        var courseFolderId = await EnsureCourseFolderAsync(offeredCourseId, uploadedByUserId);
+        try
+        {
+            await _contentSubmissionService.EnsureContentTypeEditableAsync(
+                courseContext.ProgramCourseId,
+                courseContext.SessionId,
+                ContentSubmissionTypeCodes.WeeklyContent);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+
+        var courseFolder = await _folderProvisioning.EnsureMasterFolderAsync(
+            offeredCourseId,
+            uploadedByUserId);
+        var courseFolderId = courseFolder.CourseFolderId;
         var courseContentDirectoryId = await GetDirectoryIdByTemplateCodeAsync(courseFolderId, "c");
 
         if (courseContentDirectoryId == 0)
@@ -300,16 +759,21 @@ public class TeacherWeeklyContentController : ControllerBase
                 displayOrder = parsedOrder;
             }
 
-            var beforeCount = await CountTopicsAsync(courseContext.ProgramCourseId);
+            var beforeCount = await CountTopicsAsync(
+                courseContext.ProgramCourseId,
+                courseContext.SessionId);
 
             var finalTopicId = await CreateTopicPathAsync(
                 courseContext.ProgramCourseId,
+                courseContext.SessionId,
                 weekNo,
                 topicPath,
                 displayOrder,
                 description);
 
-            var afterCount = await CountTopicsAsync(courseContext.ProgramCourseId);
+            var afterCount = await CountTopicsAsync(
+                courseContext.ProgramCourseId,
+                courseContext.SessionId);
 
             if (afterCount > beforeCount)
             {
@@ -328,7 +792,11 @@ public class TeacherWeeklyContentController : ControllerBase
 
             foreach (var cloCode in cloCodes)
             {
-                var mapped = await MapTopicToCloByCodeAsync(courseContext.ProgramCourseId, finalTopicId, cloCode);
+                var mapped = await MapTopicToCloByCodeAsync(
+                    courseContext.ProgramCourseId,
+                    courseContext.SessionId,
+                    finalTopicId,
+                    cloCode);
 
                 if (mapped)
                 {
@@ -336,8 +804,6 @@ public class TeacherWeeklyContentController : ControllerBase
                 }
             }
         }
-
-        await InitializeProgressRowsAsync(offeredCourseId, courseContext.ProgramCourseId);
 
         result.Message = result.Errors.Count == 0
             ? "Weekly content uploaded successfully."
@@ -367,6 +833,7 @@ public class TeacherWeeklyContentController : ControllerBase
         {
             ProgramCourseId = programCourseId,
             ProgramId = programId,
+            SessionId = oc.Section.SessionId,
             CourseId = oc.CourseId,
             TeacherUserId = oc.TeacherUserId,
             CourseTitle = oc.Course.CourseTitle,
@@ -409,14 +876,18 @@ public class TeacherWeeklyContentController : ControllerBase
     }
 
     // Loads topic tree with completion status for a course
-    private async Task<List<WeeklyTopicDto>> LoadTopicTreeAsync(int offeredCourseId, int programCourseId)
+    private async Task<List<WeeklyTopicDto>> LoadTopicTreeAsync(
+        int offeredCourseId,
+        int programCourseId,
+        int sessionId,
+        IReadOnlyCollection<string> visibleStatuses)
     {
         var flatTopics = new List<WeeklyTopicDto>();
 
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
 
-        var command = new SqlCommand(@"
+        var sql = @"
             SELECT
                 t.TopicID,
                 t.ProgramCourseID,
@@ -431,11 +902,16 @@ public class TeacherWeeklyContentController : ControllerBase
                 ON p.TopicID = t.TopicID
                 AND p.OfferedCourseID = @OfferedCourseID
             WHERE t.ProgramCourseID = @ProgramCourseID
-            ORDER BY ISNULL(t.WeekNo, 999), ISNULL(t.ParentTopicID, 0), ISNULL(t.DisplayOrder, 999), t.TopicID;
-        ", connection);
+            AND t.SessionID = @SessionID";
 
+        var command = new SqlCommand();
+        command.Connection = connection;
         command.Parameters.AddWithValue("@OfferedCourseID", offeredCourseId);
         command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+        command.Parameters.AddWithValue("@SessionID", sessionId);
+        AppendContentStatusFilter(command, visibleStatuses, ref sql);
+        sql += " ORDER BY ISNULL(t.WeekNo, 999), ISNULL(t.ParentTopicID, 0), ISNULL(t.DisplayOrder, 999), t.TopicID;";
+        command.CommandText = sql;
 
         await using var reader = await command.ExecuteReaderAsync();
 
@@ -531,11 +1007,16 @@ public class TeacherWeeklyContentController : ControllerBase
     }
 
     // Creates hierarchical topic path (parent-child structure)
-    private async Task<int> CreateTopicPathAsync(int programCourseId, int weekNo, string topicPath, int? displayOrder, string? description)
+    private async Task<int> CreateTopicPathAsync(
+        int programCourseId,
+        int sessionId,
+        int weekNo,
+        string topicPath,
+        int? displayOrder,
+        string? description)
     {
         var parts = topicPath
-            .Split('>')
-            .Select(x => x.Trim())
+            .Split(new[] { '>', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .ToList();
 
@@ -548,6 +1029,7 @@ public class TeacherWeeklyContentController : ControllerBase
 
             finalTopicId = await CreateOrGetTopicAsync(
                 programCourseId,
+                sessionId,
                 parentTopicId,
                 weekNo,
                 parts[index],
@@ -561,7 +1043,14 @@ public class TeacherWeeklyContentController : ControllerBase
     }
 
     // Creates or retrieves a topic from database
-    private async Task<int> CreateOrGetTopicAsync(int programCourseId, int? parentTopicId, int weekNo, string topicTitle, string? topicDescription, int? displayOrder)
+    private async Task<int> CreateOrGetTopicAsync(
+        int programCourseId,
+        int sessionId,
+        int? parentTopicId,
+        int weekNo,
+        string topicTitle,
+        string? topicDescription,
+        int? displayOrder)
     {
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
@@ -570,11 +1059,13 @@ public class TeacherWeeklyContentController : ControllerBase
             SELECT TopicID
             FROM CourseTopics
             WHERE ProgramCourseID = @ProgramCourseID
+            AND SessionID = @SessionID
             AND TopicTitle = @TopicTitle
             AND ((@ParentTopicID IS NULL AND ParentTopicID IS NULL) OR ParentTopicID = @ParentTopicID);
         ", connection);
 
         selectCommand.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+        selectCommand.Parameters.AddWithValue("@SessionID", sessionId);
         selectCommand.Parameters.AddWithValue("@TopicTitle", topicTitle);
         selectCommand.Parameters.AddWithValue("@ParentTopicID", (object?)parentTopicId ?? DBNull.Value);
 
@@ -586,45 +1077,64 @@ public class TeacherWeeklyContentController : ControllerBase
         }
 
         var insertCommand = new SqlCommand(@"
-            INSERT INTO CourseTopics (ProgramCourseID, ParentTopicID, WeekNo, TopicTitle, TopicDescription, DisplayOrder)
+            INSERT INTO CourseTopics (ProgramCourseID, SessionID, ParentTopicID, WeekNo, TopicTitle, TopicDescription, DisplayOrder, ContentStatus)
             OUTPUT INSERTED.TopicID
-            VALUES (@ProgramCourseID, @ParentTopicID, @WeekNo, @TopicTitle, @TopicDescription, @DisplayOrder);
+            VALUES (@ProgramCourseID, @SessionID, @ParentTopicID, @WeekNo, @TopicTitle, @TopicDescription, @DisplayOrder, @ContentStatus);
         ", connection);
 
         insertCommand.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+        insertCommand.Parameters.AddWithValue("@SessionID", sessionId);
         insertCommand.Parameters.AddWithValue("@ParentTopicID", (object?)parentTopicId ?? DBNull.Value);
         insertCommand.Parameters.AddWithValue("@WeekNo", weekNo);
         insertCommand.Parameters.AddWithValue("@TopicTitle", topicTitle);
         insertCommand.Parameters.AddWithValue("@TopicDescription", (object?)topicDescription ?? DBNull.Value);
         insertCommand.Parameters.AddWithValue("@DisplayOrder", (object?)displayOrder ?? DBNull.Value);
+        insertCommand.Parameters.AddWithValue("@ContentStatus", ContentStatuses.Draft);
 
         return Convert.ToInt32(await insertCommand.ExecuteScalarAsync());
     }
 
     // Maps a topic to a CLO using CLO code
-    private async Task<bool> MapTopicToCloByCodeAsync(int programCourseId, int topicId, string cloCode)
+    private async Task<bool> MapTopicToCloByCodeAsync(
+        int programCourseId,
+        int sessionId,
+        int topicId,
+        string cloCode)
     {
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
 
         var selectCloCommand = new SqlCommand(@"
-            SELECT CLOID
+            SELECT CLOID, CLOCode
             FROM CLOs
             WHERE ProgramCourseID = @ProgramCourseID
-            AND CLOCode = @CLOCode;
+            AND SessionID = @SessionID;
         ", connection);
 
         selectCloCommand.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
-        selectCloCommand.Parameters.AddWithValue("@CLOCode", cloCode);
+        selectCloCommand.Parameters.AddWithValue("@SessionID", sessionId);
 
-        var cloIdObject = await selectCloCommand.ExecuteScalarAsync();
+        var want = CloCodeFormatter.Canonical(cloCode);
+        int? cloId = null;
+        await using (var reader = await selectCloCommand.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                var stored = Convert.ToString(reader["CLOCode"]) ?? "";
+                if (!CloCodeFormatter.Equals(stored, want))
+                {
+                    continue;
+                }
 
-        if (cloIdObject == null || cloIdObject == DBNull.Value)
+                cloId = Convert.ToInt32(reader["CLOID"]);
+                break;
+            }
+        }
+
+        if (cloId == null)
         {
             return false;
         }
-
-        var cloId = Convert.ToInt32(cloIdObject);
 
         var insertCommand = new SqlCommand(@"
             IF NOT EXISTS (SELECT 1 FROM CourseTopicCLOMappings WHERE TopicID = @TopicID AND CLOID = @CLOID)
@@ -635,14 +1145,17 @@ public class TeacherWeeklyContentController : ControllerBase
         ", connection);
 
         insertCommand.Parameters.AddWithValue("@TopicID", topicId);
-        insertCommand.Parameters.AddWithValue("@CLOID", cloId);
+        insertCommand.Parameters.AddWithValue("@CLOID", cloId.Value);
 
         await insertCommand.ExecuteNonQueryAsync();
         return true;
     }
 
     // Checks if topic belongs to a specific program course
-    private async Task<bool> TopicBelongsToProgramCourseAsync(int topicId, int programCourseId)
+    private async Task<bool> TopicBelongsToProgramCourseAsync(
+        int topicId,
+        int programCourseId,
+        int sessionId)
     {
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
@@ -650,11 +1163,14 @@ public class TeacherWeeklyContentController : ControllerBase
         var command = new SqlCommand(@"
             SELECT COUNT(1)
             FROM CourseTopics
-            WHERE TopicID = @TopicID AND ProgramCourseID = @ProgramCourseID;
+            WHERE TopicID = @TopicID
+            AND ProgramCourseID = @ProgramCourseID
+            AND SessionID = @SessionID;
         ", connection);
 
         command.Parameters.AddWithValue("@TopicID", topicId);
         command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+        command.Parameters.AddWithValue("@SessionID", sessionId);
 
         return Convert.ToInt32(await command.ExecuteScalarAsync()) > 0;
     }
@@ -722,37 +1238,79 @@ public class TeacherWeeklyContentController : ControllerBase
     }
 
     // Initializes progress rows for all topics in a course
-    private async Task InitializeProgressRowsAsync(int offeredCourseId, int programCourseId)
+    private async Task InitializeProgressRowsAsync(
+        int offeredCourseId,
+        int programCourseId,
+        int sessionId,
+        IReadOnlyCollection<string> visibleStatuses)
     {
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
 
-        var command = new SqlCommand(@"
+        var sql = @"
             INSERT INTO OfferedCourseTopicProgress (OfferedCourseID, TopicID, IsCompleted)
             SELECT @OfferedCourseID, t.TopicID, 0
             FROM CourseTopics t
             WHERE t.ProgramCourseID = @ProgramCourseID
+            AND t.SessionID = @SessionID";
+
+        var command = new SqlCommand();
+        command.Connection = connection;
+        command.Parameters.AddWithValue("@OfferedCourseID", offeredCourseId);
+        command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+        command.Parameters.AddWithValue("@SessionID", sessionId);
+        AppendContentStatusFilter(command, visibleStatuses, ref sql);
+        sql += @"
             AND NOT EXISTS
             (
                 SELECT 1 FROM OfferedCourseTopicProgress p
                 WHERE p.OfferedCourseID = @OfferedCourseID AND p.TopicID = t.TopicID
-            );
-        ", connection);
-
-        command.Parameters.AddWithValue("@OfferedCourseID", offeredCourseId);
-        command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+            );";
+        command.CommandText = sql;
 
         await command.ExecuteNonQueryAsync();
     }
 
-    // Counts total topics in a program course
-    private async Task<int> CountTopicsAsync(int programCourseId)
+    private static void AppendContentStatusFilter(
+        SqlCommand command,
+        IReadOnlyCollection<string> visibleStatuses,
+        ref string sql)
+    {
+        if (visibleStatuses.Count == 0)
+        {
+            sql += " AND 1 = 0";
+            return;
+        }
+
+        var parts = visibleStatuses.Select((_, index) => $"@ContentStatus{index}").ToList();
+        var includeNullAsDraft = visibleStatuses.Contains(ContentStatuses.Draft);
+        if (includeNullAsDraft)
+        {
+            sql += $" AND (t.ContentStatus IN ({string.Join(", ", parts)}) OR t.ContentStatus IS NULL)";
+        }
+        else
+        {
+            sql += $" AND t.ContentStatus IN ({string.Join(", ", parts)})";
+        }
+
+        var statusIndex = 0;
+        foreach (var status in visibleStatuses)
+        {
+            command.Parameters.AddWithValue($"@ContentStatus{statusIndex++}", status);
+        }
+    }
+
+    // Counts total topics in a program course for a session
+    private async Task<int> CountTopicsAsync(int programCourseId, int sessionId)
     {
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
 
-        var command = new SqlCommand("SELECT COUNT(1) FROM CourseTopics WHERE ProgramCourseID = @ProgramCourseID;", connection);
+        var command = new SqlCommand(
+            "SELECT COUNT(1) FROM CourseTopics WHERE ProgramCourseID = @ProgramCourseID AND SessionID = @SessionID;",
+            connection);
         command.Parameters.AddWithValue("@ProgramCourseID", programCourseId);
+        command.Parameters.AddWithValue("@SessionID", sessionId);
 
         return Convert.ToInt32(await command.ExecuteScalarAsync());
     }
@@ -966,13 +1524,7 @@ public class TeacherWeeklyContentController : ControllerBase
 
     // Converts relative path into absolute server path
     private string GetAbsolutePath(string relativePath)
-    {
-        var cleanRelativePath = relativePath
-            .Replace("/", Path.DirectorySeparatorChar.ToString())
-            .Replace("\\", Path.DirectorySeparatorChar.ToString());
-
-        return Path.Combine(GetWebRootPath(), cleanRelativePath);
-    }
+        => FolderStoragePath.Resolve(_environment, relativePath);
 
     // Cleans file name by removing invalid characters
     private static string SanitizeFileName(string value)

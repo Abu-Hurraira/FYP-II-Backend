@@ -373,17 +373,23 @@ namespace FolderManagementSystemAPI.Controllers
                         continue;
                     }
 
-                    if (!int.TryParse(roleIdText, out int roleId))
-                    {
-                        errors.Add($"Row {excelRowNumber}: Role ID is invalid.");
-                        continue;
-                    }
+                    Role? role = null;
 
-                    var role = await _context.Roles.FirstOrDefaultAsync(r => r.RoleId == roleId);
+                    // Accept either numeric Role ID (e.g. 4) or Role name (e.g. Teacher / HOD)
+                    if (int.TryParse(roleIdText, out int roleId))
+                    {
+                        role = await _context.Roles.FirstOrDefaultAsync(r => r.RoleId == roleId);
+                    }
+                    else if (!string.IsNullOrWhiteSpace(roleIdText))
+                    {
+                        var roleName = roleIdText.Trim().ToLower();
+                        role = await _context.Roles.FirstOrDefaultAsync(r =>
+                            r.RoleName != null && r.RoleName.ToLower() == roleName);
+                    }
 
                     if (role == null)
                     {
-                        errors.Add($"Row {excelRowNumber}: Role ID does not exist.");
+                        errors.Add($"Row {excelRowNumber}: Role must be a valid numeric Role ID or Role name (Teacher/HOD).");
                         continue;
                     }
 
@@ -420,7 +426,7 @@ namespace FolderManagementSystemAPI.Controllers
                     {
                         FullName = fullName,
                         Email = email,
-                        RoleId = roleId,
+                        RoleId = role.RoleId,
                         Rank = string.IsNullOrWhiteSpace(rank) ? null : rank,
                         AridNo = string.IsNullOrWhiteSpace(aridNo) ? null : aridNo
                     };

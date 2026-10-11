@@ -37,15 +37,18 @@ public class TeacherPermissionsController : ControllerBase
     }
 
     [HttpPut("programs/{programId:int}/courses/{courseId:int}/teachers/{teacherUserId:int}")]
-    public async Task<ActionResult<TeacherPermissionFlagsDto>> UpdateTeacherPermission(
+    public async Task<ActionResult<UpdateTeacherPermissionResultDto>> UpdateTeacherPermission(
         int programId,
         int courseId,
         int teacherUserId,
         UpdateTeacherPermissionDto dto)
     {
+        // Lightweight existence check (no Role Include graph).
         var hodExists = await _context.Users
-            .Include(u => u.Role)
-            .AnyAsync(u => u.UserId == dto.HodUserId && u.Role.RoleName == "HOD");
+            .AsNoTracking()
+            .AnyAsync(u =>
+                u.UserId == dto.HodUserId &&
+                u.Role.RoleName == "HOD");
 
         if (!hodExists)
         {
@@ -54,7 +57,7 @@ public class TeacherPermissionsController : ControllerBase
 
         try
         {
-            var flags = await _permissionService.SetPermissionAsync(
+            var result = await _permissionService.SetPermissionAsync(
                 programId,
                 courseId,
                 teacherUserId,
@@ -62,7 +65,7 @@ public class TeacherPermissionsController : ControllerBase
                 dto.IsAllowed,
                 dto.HodUserId);
 
-            return Ok(flags);
+            return Ok(result);
         }
         catch (InvalidOperationException ex)
         {

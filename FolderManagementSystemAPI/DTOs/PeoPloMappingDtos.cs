@@ -12,7 +12,7 @@ public class PeoPloMatrixCellDto
 {
     public int PloId { get; set; }
     public int? MappingId { get; set; }
-    public decimal? Percentage { get; set; }
+    public bool IsMapped { get; set; }
 }
 
 public class PeoPloMatrixRowDto
@@ -24,27 +24,19 @@ public class PeoPloMatrixRowDto
     public List<PeoPloMatrixCellDto> Cells { get; set; } = new();
 }
 
-public class PeoRowCapacityDto
-{
-    public int PeoId { get; set; }
-    public decimal UsedPercentage { get; set; }
-    public decimal RemainingPercentage { get; set; }
-}
-
 public class PeoPloMatrixDto
 {
     public int ProgramId { get; set; }
     public string ProgramName { get; set; } = string.Empty;
     public List<PeoPloMatrixColumnDto> Plos { get; set; } = new();
     public List<PeoPloMatrixRowDto> Peos { get; set; } = new();
-    public List<PeoRowCapacityDto> PeoRowCapacities { get; set; } = new();
 }
 
 public class SavePeoPloMatrixCellDto
 {
     public int PeoId { get; set; }
     public int PloId { get; set; }
-    public decimal? Percentage { get; set; }
+    public bool IsMapped { get; set; }
 }
 
 public class SavePeoPloMatrixDto
@@ -58,5 +50,5 @@ public class SavePeoPloSingleCellDto
     public int MappedByUserId { get; set; }
     public int PeoId { get; set; }
     public int PloId { get; set; }
-    public decimal? Percentage { get; set; }
+    public bool IsMapped { get; set; }
 }

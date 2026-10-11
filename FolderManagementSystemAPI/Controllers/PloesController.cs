@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FolderManagementSystemAPI.DTOs;
 using FolderManagementSystemAPI.Models;
+using FolderManagementSystemAPI.Services;
 
 namespace FolderManagementSystemAPI.Controllers
 {
@@ -12,11 +13,15 @@ namespace FolderManagementSystemAPI.Controllers
     public class PLOsController : ControllerBase
     {
         private readonly FolderManagementDbContext _context;
+        private readonly OutcomeCatalogVersionService _outcomeCatalogVersionService;
 
         // Constructor: Inject database context
-        public PLOsController(FolderManagementDbContext context)
+        public PLOsController(
+            FolderManagementDbContext context,
+            OutcomeCatalogVersionService outcomeCatalogVersionService)
         {
             _context = context;
+            _outcomeCatalogVersionService = outcomeCatalogVersionService;
         }
 
         // GET: api/PLOs/by-program/{programId}
@@ -174,6 +179,7 @@ namespace FolderManagementSystemAPI.Controllers
             int inserted = 0;
             int skipped = 0;
             var errors = new List<string>();
+            var versionSnapshot = new List<OutcomeCatalogSnapshotItem>();
 
             using var stream = file.OpenReadStream();
             using var workbook = new XLWorkbook(stream);
@@ -214,6 +220,12 @@ namespace FolderManagementSystemAPI.Controllers
                     code = $"PLO-{nextNumber}";
                 }
 
+                versionSnapshot.Add(new OutcomeCatalogSnapshotItem
+                {
+                    ItemCode = code,
+                    ItemDescription = description
+                });
+
                 // Duplicate check
                 var duplicate = await _context.Plos.AnyAsync(p =>
                     p.ProgramId == programId &&
@@ -238,6 +250,21 @@ namespace FolderManagementSystemAPI.Controllers
                 inserted++;
             }
 
+            int? catalogVersionId = null;
+            string? catalogVersionLabel = null;
+            var catalogVersionCreated = false;
+            if (versionSnapshot.Count > 0)
+            {
+                var (version, createdNew) = await _outcomeCatalogVersionService.EnsureVersionFromSnapshotAsync(
+                    OutcomeCatalogTypes.Plo,
+                    programId,
+                    file.FileName,
+                    versionSnapshot);
+                catalogVersionId = version.OutcomeCatalogVersionId;
+                catalogVersionLabel = version.VersionLabel;
+                catalogVersionCreated = createdNew;
+            }
+
             return Ok(new
             {
                 success = true,
@@ -245,7 +272,10 @@ namespace FolderManagementSystemAPI.Controllers
                 insertedCount = inserted,
                 skippedCount = skipped,
                 errorCount = errors.Count,
-                errors
+                errors,
+                catalogVersionId,
+                catalogVersionLabel,
+                catalogVersionCreated
             });
         }
 

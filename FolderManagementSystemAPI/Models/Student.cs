@@ -27,4 +27,7 @@ public partial class Student
     [ForeignKey("SectionId")]
     [InverseProperty("Students")]
     public virtual Section Section { get; set; } = null!;
+
+    public virtual ICollection<StudentOfferedCourse> StudentOfferedCourses { get; set; } =
+        new List<StudentOfferedCourse>();
 }

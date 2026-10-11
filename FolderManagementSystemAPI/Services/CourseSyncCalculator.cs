@@ -40,7 +40,7 @@ public static class CourseSyncCalculator
             ? Math.Round((decimal)alignedTopics / totalTopics * 100, 0)
             : 0m;
 
-        var deviationLabel = BuildDeviationLabel(hasWeeklyContent, gapTopics);
+        var deviationLabel = BuildDeviationLabel(hasWeeklyContent, coveredTopics, gapTopics);
 
         return new SyncMetrics
         {
@@ -91,11 +91,17 @@ public static class CourseSyncCalculator
         return gapCount;
     }
 
-    public static string BuildDeviationLabel(bool hasWeeklyContent, int gapTopics)
+    public static string BuildDeviationLabel(bool hasWeeklyContent, int coveredTopics, int gapTopics)
     {
         if (!hasWeeklyContent)
         {
             return "No topics";
+        }
+
+        // Avoid calling empty/incomplete sections "In sync" just because peers also have no progress.
+        if (coveredTopics == 0 && gapTopics == 0)
+        {
+            return "No progress";
         }
 
         if (gapTopics == 0)
